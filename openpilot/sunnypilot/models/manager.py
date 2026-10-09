@@ -17,7 +17,7 @@ from openpilot.common.hardware.hw import Paths
 
 from openpilot.cereal import messaging, custom
 from openpilot.sunnypilot.models.fetcher import ModelFetcher
-from openpilot.sunnypilot.models.helpers import (ACTIVE_BUNDLE_KEYS, get_active_bundle, get_selected_bundle,
+from openpilot.sunnypilot.models.helpers import (ACTIVE_BUNDLE_KEYS, _bundle_is_valid_locally, get_active_bundle, get_selected_bundle,
                                                   resolve_bundle_by_ref, validate_active_bundles, verify_file, bundled_qcom_fallback)
 from openpilot.sunnypilot.models.model_name import DEFAULT_MODEL_REF
 
@@ -51,6 +51,7 @@ class ModelManagerSP:
     self._chunk_size = 128 * 1000  # 128 KB chunks
     self._download_start_times: dict[str, float] = {}  # Track start time per model
     self._download_ref: bytes | str | None = None
+    self._big_files_checked: set[str] = set()  # refs checked while a Chestnut is fitted
 
   def _download_interrupted(self) -> bool:
     # only removal cancels: a different ref is a queued selection that
@@ -271,14 +272,16 @@ class ModelManagerSP:
   async def _download_bundle(self, model_bundle: custom.ModelManagerSP.ModelBundle, destination_path: str, source: str) -> None:
     self.selected_bundle = model_bundle
     self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.downloading
-    for model in self.selected_bundle.models:
+    # Keep the big-model selection even without a Chestnut; Jetlink fetches its own model form.
+    models = [] if source == "chestnut" and not self.chestnut_present else self.selected_bundle.models
+    for model in models:
       model.artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.downloading
     self._report_status()
     os.makedirs(destination_path, exist_ok=True)
 
     try:
       seen_artifacts: set[str] = set()
-      for model in self.selected_bundle.models:
+      for model in models:
         artifact = model.artifact
         if not artifact.fileName:
           continue
@@ -307,6 +310,25 @@ class ModelManagerSP:
   def download(self, model_bundle: custom.ModelManagerSP.ModelBundle, destination_path: str, source: str) -> None:
     """Main entry point for downloading a model bundle"""
     asyncio.run(self._download_bundle(model_bundle, destination_path, source))
+
+  def _fetch_big_model_files(self) -> None:
+    """Fetch the selected big-model files when a Chestnut is present.
+
+    Without a Chestnut, preserve the selection without downloading its files;
+    Jetlink uses the selected model ref to fetch its own runtime representation.
+    """
+    if not self.chestnut_present or self.params.get("ModelManager_DownloadRef") is not None:
+      return
+    raw = self.params.get(ACTIVE_BUNDLE_KEYS["chestnut"])
+    if not isinstance(raw, dict) or raw.get("ref") in self._big_files_checked:
+      return
+    bundle = get_selected_bundle(self.params, "chestnut")
+    if bundle is None:
+      return
+    self._big_files_checked.add(bundle.ref)
+    if not _bundle_is_valid_locally(bundle):
+      cloudlog.warning(f"Fetching selected big model files for Chestnut: {bundle.displayName}")
+      self.params.put("ModelManager_DownloadRef", bundle.ref)
 
   def _process_download_requests(self) -> None:
     # loops so a ref queued during a download starts in the same tick, without
@@ -343,6 +365,7 @@ class ModelManagerSP:
         self.active_bundle = get_active_bundle(self.params, chestnut=self.chestnut_present)
 
         ensure_default_qcom_fallback(self.params)
+        self._fetch_big_model_files()
         self._process_download_requests()
 
         if self.params.get("ModelManager_ClearCache"):
