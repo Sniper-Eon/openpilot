@@ -66,7 +66,7 @@ def manager_init() -> None:
     if default_value is not None and params.get(k) is None:
       params.put(k, default_value, block=True)
 
-  # This prebuilt channel never starts cabin preview, monitoring, or recording.
+  # This alternate channel never starts cabin preview, monitoring, or recording.
   for key in ("IsDriverViewEnabled", "AlwaysOnDM", "RecordFront", "DriverTooDistracted"):
     params.put_bool(key, False, block=True)
   params.remove("Offroad_DriverMonitoringUncertain")

@@ -53,7 +53,7 @@ KEYS = _Keys(link='JetlinkLink', offroad='IsOffroad', progress='AcceleratorProgr
 # comma's chestnut, running and in its ROM (common.hardware.usb): the comma's
 # USB-C port hosts one and is never held as a jetlink device beside it. The
 # hardware package is too heavy for the owner, so they are written out here
-CHESTNUT_IDS = frozenset({(0xADD1, 0x0001), (0x3801, 0x0001), (0x174C, 0x2464), (0x174C, 0x2463)})
+CHESTNUT_IDS = frozenset({(0xADD1, 0x0001), (0xADD1, 0x0002), (0x3801, 0x0001), (0x174C, 0x2464), (0x174C, 0x2463)})
 
 # where the build puts the warp for each camera (SConscript) and modeld loads
 # it from: in the fork's tree, never in the jetlink submodule (a file there

@@ -144,6 +144,9 @@ class RestartingPythonProcess(PythonProcess):
   BACKOFF = 10.0
   BACKOFF_MAX = 300.0
 
+  def now(self) -> float:
+    return time.monotonic()
+
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
     self.started_at = 0.0
@@ -151,7 +154,7 @@ class RestartingPythonProcess(PythonProcess):
     self.next_start = 0.0
 
   def start(self) -> None:
-    now = time.monotonic()
+    now = self.now()
     if self.proc is not None and self.proc.exitcode is not None:
       if now - self.started_at < self.QUICK_DEATH:
         self.backoff = min(self.BACKOFF_MAX, 2 * self.backoff or self.BACKOFF)
