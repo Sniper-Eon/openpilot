@@ -413,6 +413,9 @@ def main(demo=False):
       'action_t': np.array([lat_action_t, long_action_t], dtype=np.float32),
     }
 
+    # The joining model can hand off between accelerator and small model.
+    model.frame_drop_ratio = frame_drop_ratio
+    handovers = getattr(model, 'handovers', 0)
     mt1 = time.perf_counter()
     try:
       send_chestnut = (chestnut_state is not None and
@@ -433,6 +436,9 @@ def main(demo=False):
       model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
+    if getattr(model, 'handovers', 0) != handovers:
+      run_count = 0
+      frame_drop_ratio = 0.
 
     if model_output is not None:
       modelv2_send = messaging.new_message('modelV2')
