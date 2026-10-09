@@ -145,6 +145,14 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"UsbGpuLoadingProgress", {CLEAR_ON_MANAGER_START | CLEAR_ON_OFFROAD_TRANSITION | CLEAR_ON_IGNITION_ON, INT, "0"}},
     {"Version", {PERSISTENT, STRING}},
 
+    // Accelerators: what runs the large model. See sunnypilot/jetlink_adapter/.
+    {"AcceleratorProgress", {CLEAR_ON_MANAGER_START, JSON}},
+    {"Offroad_AcceleratorUnavailable", {CLEAR_ON_MANAGER_START, JSON}},
+    // Persist backend build metadata across reboots and ignition cycles.
+    {"JetlinkLink", {PERSISTENT | BACKUP, INT, "0"}},
+    {"JetlinkSpec", {PERSISTENT, JSON}},
+    {"JetlinkModelPointers", {PERSISTENT, JSON}},
+
     // --- sunnypilot params --- //
     {"ApiCache_DriveStats", {PERSISTENT, JSON}},
     {"AutoLaneChangeBsmDelay", {PERSISTENT | BACKUP, BOOL, "0"}},
