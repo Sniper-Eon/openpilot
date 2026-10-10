@@ -35,6 +35,9 @@ class ChestnutState(Enum):
   LOADING = "loading"
   ACTIVE = "active"
   FAILED = "failed"
+  # onroad, an off-board accelerator only: loaded and waiting for a window to
+  # switch. A board is loaded before the first modelV2 and never sees this
+  WAITING = "waiting"
 
 
 class UIState(UIStateSP):
@@ -250,6 +253,12 @@ class UIState(UIStateSP):
       self._started_prev = self.started
 
   def _update_chestnut_state(self) -> None:
+    # an attached accelerator owns this state while no board is fitted: the same
+    # icon, fed by jetlink's snapshot instead of the chestnut records
+    if (view := self.jetlink_view) is not None:
+      self.chestnut_state = self._jetlink_state(view)
+      return
+
     detected = self.sm["deviceState"].chestnutPresent
     if not self.started:
       self.chestnut_present = detected

@@ -2922,7 +2922,7 @@ struct UIDebug {
   class Pipeline;
 
   struct _capnpPrivate {
-    CAPNP_DECLARE_STRUCT_HEADER(fe35ad896ffaeacf, 1, 0)
+    CAPNP_DECLARE_STRUCT_HEADER(fe35ad896ffaeacf, 4, 0)
     #if !CAPNP_LITE
     static constexpr ::capnp::_::RawBrandedSchema const* brand() { return &schema->defaultBrand; }
     #endif  // !CAPNP_LITE
@@ -21163,6 +21163,26 @@ public:
 
   inline float getFrameTimeMillis() const;
 
+  inline bool getTrafficPlanAvailable() const;
+
+  inline  ::uint64_t getTrafficPlanMonoTime() const;
+
+  inline  ::uint8_t getTrafficPlanLightState() const;
+
+  inline  ::uint8_t getTrafficPlanPhase() const;
+
+  inline  ::uint64_t getTrafficDisplayFrame() const;
+
+  inline bool getTrafficDisplayedVisible() const;
+
+  inline bool getTrafficDisplayedHasSignal() const;
+
+  inline  ::uint8_t getTrafficDisplayedLightState() const;
+
+  inline  ::uint8_t getTrafficDisplayedPhase() const;
+
+  inline bool getTrafficDisplayedControlActive() const;
+
 private:
   ::capnp::_::StructReader _reader;
   template <typename, ::capnp::Kind>
@@ -21196,6 +21216,36 @@ public:
 
   inline float getFrameTimeMillis();
   inline void setFrameTimeMillis(float value);
+
+  inline bool getTrafficPlanAvailable();
+  inline void setTrafficPlanAvailable(bool value);
+
+  inline  ::uint64_t getTrafficPlanMonoTime();
+  inline void setTrafficPlanMonoTime( ::uint64_t value);
+
+  inline  ::uint8_t getTrafficPlanLightState();
+  inline void setTrafficPlanLightState( ::uint8_t value);
+
+  inline  ::uint8_t getTrafficPlanPhase();
+  inline void setTrafficPlanPhase( ::uint8_t value);
+
+  inline  ::uint64_t getTrafficDisplayFrame();
+  inline void setTrafficDisplayFrame( ::uint64_t value);
+
+  inline bool getTrafficDisplayedVisible();
+  inline void setTrafficDisplayedVisible(bool value);
+
+  inline bool getTrafficDisplayedHasSignal();
+  inline void setTrafficDisplayedHasSignal(bool value);
+
+  inline  ::uint8_t getTrafficDisplayedLightState();
+  inline void setTrafficDisplayedLightState( ::uint8_t value);
+
+  inline  ::uint8_t getTrafficDisplayedPhase();
+  inline void setTrafficDisplayedPhase( ::uint8_t value);
+
+  inline bool getTrafficDisplayedControlActive();
+  inline void setTrafficDisplayedControlActive(bool value);
 
 private:
   ::capnp::_::StructBuilder _builder;
@@ -50491,6 +50541,146 @@ inline float UIDebug::Builder::getFrameTimeMillis() {
 inline void UIDebug::Builder::setFrameTimeMillis(float value) {
   _builder.setDataField<float>(
       ::capnp::bounded<1>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool UIDebug::Reader::getTrafficPlanAvailable() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<64>() * ::capnp::ELEMENTS);
+}
+
+inline bool UIDebug::Builder::getTrafficPlanAvailable() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<64>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficPlanAvailable(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<64>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t UIDebug::Reader::getTrafficPlanMonoTime() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t UIDebug::Builder::getTrafficPlanMonoTime() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficPlanMonoTime( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<2>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t UIDebug::Reader::getTrafficPlanLightState() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t UIDebug::Builder::getTrafficPlanLightState() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficPlanLightState( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<9>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t UIDebug::Reader::getTrafficPlanPhase() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t UIDebug::Builder::getTrafficPlanPhase() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficPlanPhase( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<10>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint64_t UIDebug::Reader::getTrafficDisplayFrame() const {
+  return _reader.getDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint64_t UIDebug::Builder::getTrafficDisplayFrame() {
+  return _builder.getDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficDisplayFrame( ::uint64_t value) {
+  _builder.setDataField< ::uint64_t>(
+      ::capnp::bounded<3>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool UIDebug::Reader::getTrafficDisplayedVisible() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<65>() * ::capnp::ELEMENTS);
+}
+
+inline bool UIDebug::Builder::getTrafficDisplayedVisible() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<65>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficDisplayedVisible(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<65>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool UIDebug::Reader::getTrafficDisplayedHasSignal() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<66>() * ::capnp::ELEMENTS);
+}
+
+inline bool UIDebug::Builder::getTrafficDisplayedHasSignal() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<66>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficDisplayedHasSignal(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<66>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t UIDebug::Reader::getTrafficDisplayedLightState() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t UIDebug::Builder::getTrafficDisplayedLightState() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficDisplayedLightState( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<11>() * ::capnp::ELEMENTS, value);
+}
+
+inline  ::uint8_t UIDebug::Reader::getTrafficDisplayedPhase() const {
+  return _reader.getDataField< ::uint8_t>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+
+inline  ::uint8_t UIDebug::Builder::getTrafficDisplayedPhase() {
+  return _builder.getDataField< ::uint8_t>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficDisplayedPhase( ::uint8_t value) {
+  _builder.setDataField< ::uint8_t>(
+      ::capnp::bounded<12>() * ::capnp::ELEMENTS, value);
+}
+
+inline bool UIDebug::Reader::getTrafficDisplayedControlActive() const {
+  return _reader.getDataField<bool>(
+      ::capnp::bounded<67>() * ::capnp::ELEMENTS);
+}
+
+inline bool UIDebug::Builder::getTrafficDisplayedControlActive() {
+  return _builder.getDataField<bool>(
+      ::capnp::bounded<67>() * ::capnp::ELEMENTS);
+}
+inline void UIDebug::Builder::setTrafficDisplayedControlActive(bool value) {
+  _builder.setDataField<bool>(
+      ::capnp::bounded<67>() * ::capnp::ELEMENTS, value);
 }
 
 inline bool ManagerState::Reader::hasProcesses() const {

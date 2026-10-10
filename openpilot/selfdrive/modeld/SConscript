@@ -34,6 +34,8 @@ else:
   tg_backend = 'CPU'
   tg_flags = f'DEV=CPU' if arch == 'Darwin' else 'DEV=CPU:LLVM'
 
+Export('camera_configs')
+
 tg_devices = { # which device to put jit inputs to at runtime
   'openpilot.selfdrive.modeld.dmonitoringmodeld': {
     'default': {'DEV': tg_backend}
@@ -120,7 +122,8 @@ if not os.getenv('SKIP_TINYGRAD_COMPILE'):
 fn = File(f"models/dmonitoring_model").abspath
 script_files = [File(Dir("#openpilot/selfdrive/modeld").File("get_model_metadata.py").abspath)]
 cmd = f'{tg_flags} {mac_brew_string} python3 {Dir("#openpilot/selfdrive/modeld").abspath}/get_model_metadata.py {fn}.onnx'
-lenv.Command(fn + "_metadata.pkl", [fn + ".onnx"] + tinygrad_files + script_files + [tg_devices_node], cmd)
+if not os.getenv('SKIP_TINYGRAD_COMPILE'):
+  lenv.Command(fn + "_metadata.pkl", [fn + ".onnx"] + tinygrad_files + script_files + [tg_devices_node], cmd)
 
 dm_w, dm_h = DM_INPUT_SIZE
 compile_dm_warp_script = [File(f"{modeld_dir}/compile_dm_warp.py")]
@@ -146,4 +149,5 @@ def tg_compile(flags, model_name):
      Action(do_chunk, "  [CHUNK] $TARGET")],
   )
 
-tg_compile(tg_flags, 'dmonitoring_model')
+if not os.getenv('SKIP_TINYGRAD_COMPILE'):
+  tg_compile(tg_flags, 'dmonitoring_model')
