@@ -13,6 +13,8 @@ class FakeChestnutState(Enum):
   LOADING = "loading"
   ACTIVE = "active"
   FAILED = "failed"
+  # the accelerator's onroad swap window, as the real enum has it
+  WAITING = "waiting"
 
 
 fake_ui_state_module = ModuleType("openpilot.selfdrive.ui.ui_state")
@@ -42,6 +44,9 @@ def _state(params, bundles, *, present: bool, active: bool | None, loading: bool
     chestnut_active=active,
     chestnut_loading=loading,
     chestnut_state=FakeChestnutState.ACTIVE if active else FakeChestnutState.FAILED,
+    # no jetlink on the bench: model_info reads it for the accelerator's default
+    # and for what is carrying when no board is fitted
+    jetlink=None,
     is_offroad=lambda: offroad,
   )
 
