@@ -139,7 +139,15 @@ class ModelCache:
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v22.json"
-  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v27.json"
+  # v26, not a later one: the catalog version and the selector version move
+  # together. v26 is v25 plus Cinque Terre V3 at selector 19, the version this
+  # build requires (helpers.REQUIRED_JSON_VERSION); v27 onwards stamp selector
+  # 20 and a newer tinygrad, and is_bundle_version_compatible drops every one of
+  # their bundles, which reads as "no models available" and clears the pick.
+  # jetlink pins the same v26 (registry.catalog.CATALOG_VERSION), so the two
+  # ends agree on which models exist. The qcom catalog above still pairs with
+  # this build's tinygrad_ref, which is v25/v26's, not v27's.
+  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v26.json"
 
   MODEL_SOURCES = {
     "qcom": (MODEL_URL, ""),
