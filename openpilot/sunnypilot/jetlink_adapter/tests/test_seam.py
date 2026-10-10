@@ -762,9 +762,12 @@ class ModeldTinygrad(Footprint, OpenpilotTestCase):
     self.assertEqual(lines(self.src), lines(MODELD.read_text()))
 
   def test_driving_model_data_says_which_model_drove(self):
-    # the qlog's only model message: stock modeld copies modelV2.big into it
-    # (fill_driving_model_data), and modeld_v2 fills its own
-    self.assertIn("drivingdata_send.drivingModelData.big = model.chestnut", self.src)
+    # modelV2 is what carries which model drove. drivingModelData has no such
+    # member in this branch's cereal, so writing it raises AttributeError and
+    # takes modeld down on its first frame - the runtime is the authority here,
+    # not the shape of the source branch this line came from.
+    self.assertIn("modelv2_send.modelV2.big = model.chestnut", self.src)
+    self.assertNotIn("drivingModelData.big", self.src)
 
 
 if __name__ == '__main__':
