@@ -214,7 +214,9 @@ procs = [
   PythonProcess("maneuversd", "openpilot.tools.longitudinal_maneuvers.maneuversd", long_maneuver),
   PythonProcess("lateral_maneuversd", "openpilot.tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),
   PythonProcess("radard", "openpilot.selfdrive.controls.radard", only_onroad),
-  PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run),
+  # hardwared owns deviceState and started never leaves False without it, so a
+  # dead hardwared parks the car offroad until a human reboots. Bring it back.
+  PythonProcess("hardwared", "openpilot.system.hardware.hardwared", always_run, restart_if_crash=True),
   PythonProcess("modem", "openpilot.common.hardware.comma.modem", always_run, enabled=COMMA_HARDWARE),
   PythonProcess("tombstoned", "openpilot.system.tombstoned", always_run, enabled=not PC),
   PythonProcess("updated", "openpilot.system.updated.updated", only_offroad, enabled=not PC),

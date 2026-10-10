@@ -11,6 +11,7 @@ import os
 os.environ['GMMU'] = '0'
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.selfdrive.modeld.helpers import chestnut_present, load_oob
+from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT, configure_default_device, load_with_timeout
 from openpilot.sunnypilot.hardware.profile import HardwareProfile, get_hardware_profile
 configure_default_device(COMMA_HARDWARE, c3xl=get_hardware_profile() == HardwareProfile.C3XL)
@@ -392,11 +393,16 @@ def main(demo=False):
   sentry.set_tag("daemon", PROCESS_NAME)
   cloudlog.bind(daemon=PROCESS_NAME)
   setproctitle(PROCESS_NAME)
-  config_realtime_process(7, 54)
 
   CHESTNUT = chestnut_present()
   if CHESTNUT:
     os.environ['HCQDEV_WAIT_TIMEOUT_MS'] = '3000'
+
+  # Prepare external accelerator before entering realtime scheduling.
+  if not CHESTNUT:
+    jetlink_adapter.prepare()
+
+  config_realtime_process(7, 54)
 
   params = Params()
   params.put_bool("ChestnutLoading", CHESTNUT)
@@ -445,6 +451,8 @@ def main(demo=False):
     params=params,
     update_loading_progress=update_loading_progress,
   )
+  if (joined := jetlink_adapter.attach(small_model, vipc_client_main.width, vipc_client_main.height)) is not None:
+    model = joined
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
   # messaging
@@ -574,18 +582,37 @@ def main(demo=False):
     if 'action_t' in model.numpy_inputs:
       inputs['action_t'] = np.array([lat_action_t, long_action_t], dtype=np.float32)
 
+    # The joining model can hand off between accelerator and small model.
+    model.frame_drop_ratio = frame_drop_ratio
+    handovers = getattr(model, 'handovers', 0)
     mt1 = time.perf_counter()
-    send_chestnut = (chestnut_state is not None and
-                    run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutState'].frequency) == 0)
-    model, model_output, fell_back = run_model_with_fallback(
-      model, small_model, params, chestnut_state, bufs, transforms, inputs,
-      after_enqueue=chestnut_state.send if send_chestnut else None,
-    )
-    if fell_back:
+    try:
+      send_chestnut = (chestnut_state is not None and
+                      run_count % round(model.constants.MODEL_FREQ / SERVICE_LIST['chestnutState'].frequency) == 0)
+      model_output = model.run(bufs, transforms, inputs, chestnut_state.send if send_chestnut else None)
+    except Exception as error:
+      if not params.get_bool("ChestnutActive"):
+        raise
+      # a chestnut fault is this modeld's to absorb: it demotes to the small
+      # model, and the joining model's own faults never reach here (it demotes
+      # itself and re-runs the frame), so what is left is the small model's
+      params.put_bool("ChestnutActive", False, block=True)
+      params.put_bool("ChestnutModelError", True, block=True)
+      if small_model is None:
+        cloudlog.exception("chestnut failed and small fallback unavailable")
+        raise RuntimeError("chestnut failed and small fallback unavailable") from error
+      cloudlog.exception("chestnut failed, falling back to small")
+      if chestnut_state is not None:
+        chestnut_state.big = False
+      model = small_model
       run_count = 0
       long_delay = CP.longitudinalActuatorDelay + model.LONG_SMOOTH_SECONDS
+      model_output = None
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
+    if getattr(model, 'handovers', 0) != handovers:
+      run_count = 0
+      frame_drop_ratio = 0.
 
     if model_output is not None:
       model_output_t = time.monotonic()
@@ -598,6 +625,7 @@ def main(demo=False):
       drivingdata_send = messaging.new_message('drivingModelData')
       posenet_send = messaging.new_message('cameraOdometry')
       mdv2sp_send = messaging.new_message('modelDataV2SP')
+      mdv2sp_send.modelDataV2SP.acceleratorState = getattr(model, 'big_model_state', 'none')
 
       action = model.get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
       prev_action = action
@@ -605,6 +633,8 @@ def main(demo=False):
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
                      frame_drop_ratio, meta_main.timestamp_eof, model_execution_time, live_calib_seen, meta_constants)
       modelv2_send.modelV2.big = model.chestnut
+      # as stock modeld's fill_driving_model_data: the qlog's only model message
+      drivingdata_send.drivingModelData.big = model.chestnut
 
       desire_state = modelv2_send.modelV2.meta.desireState
       l_lane_change_prob = desire_state[log.Desire.laneChangeLeft]
