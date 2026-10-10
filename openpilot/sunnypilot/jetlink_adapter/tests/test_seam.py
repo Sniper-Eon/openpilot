@@ -36,6 +36,7 @@ from jetlink.openpilot.joining import JoiningModelState
 from openpilot.common.params import Params
 from openpilot.common.test import OpenpilotTestCase
 from openpilot.sunnypilot import jetlink_adapter
+from openpilot.sunnypilot.hardware.profile import HardwareProfile, allows_automatic_power_down, power_down_requested
 
 OPENPILOT = Path(__file__).resolve().parents[3]
 MODELD = OPENPILOT / 'selfdrive' / 'modeld' / 'modeld.py'
@@ -592,29 +593,43 @@ class HardwaredPowersOffWithoutStopping(OpenpilotTestCase):
     powering_off = next(n for n in body if isinstance(n, ast.Assign) and 'not_powering_off' in ast.dump(n.targets[0]))
     should = next(i for i, n in enumerate(body) if _assigns(n, 'should_start') and 'all' in ast.dump(n.value))
     start = next(n for n in body if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == 'should_start')
-    check = next(n for n in body if isinstance(n, ast.If) and 'should_shutdown' in ast.dump(n.test))
+    # this branch puts its C3XL profile gate in front of the power monitor's own
+    # answer (allows_automatic_power_down/power_down_requested), so the decision is
+    # two statements and the check tests their result instead of calling
+    # power_monitor.should_shutdown inline as develop does. Lift the pair with the
+    # check: the handshake is what this class is about, and the gate the snippets
+    # now run through has its own tests (sunnypilot/hardware/tests/test_profile.py)
+    # and one of its own here (test_on_c3xl_the_settings_ui_still_powers_it_off)
+    decide = next(i for i, n in enumerate(body) if _assigns(n, 'automatic_power_down'))
+    check = next(n for n in body if isinstance(n, ast.If) and 'DoShutdown' in ast.dump(n))
     publish = next(i for i, n in enumerate(body) if "'deviceState'" in ast.dump(n) and 'send' in ast.dump(n))
     self.assertLess(body.index(powering_off), should, "the startup condition comes after the start it holds back")
     self.assertLess(body.index(check), publish, "deviceState is no longer published after the shutdown check")
+    self.assertEqual(decide + 2, body.index(check), "the power-down decision no longer sits directly above the check it feeds")
 
     def code(*nodes):
       return compile('\n'.join(textwrap.dedent(ast.get_source_segment(src, n, padded=True) or '') for n in nodes),
                      str(HARDWARED), 'exec')
     self.init = code(init)
-    self.loop = code(powering_off, body[should], body[should + 1], start, check)
+    self.loop = code(powering_off, body[should], body[should + 1], start, body[decide], body[decide + 1], check)
 
   def run_loops(self, n: int, asks: bool = True, should_shutdown=True, clock_step: float = 0.5,
-                ignition=lambda now: False, started_ts=None) -> SimpleNamespace:
+                ignition=lambda now: False, started_ts=None, profile=HardwareProfile.STANDARD,
+                force_power_down: bool = False) -> SimpleNamespace:
     clock = FakeClock()
     jetlink = FakePowerOff(asks)
     params = FakeParams()
+    params.put_bool('ForcePowerDown', force_power_down)
     onroad_conditions = {'ignition': False, 'device_temp_good': True}
     ns = {'power_monitor': SimpleNamespace(should_shutdown=lambda *a: should_shutdown(clock.now) if callable(should_shutdown)
                                            else should_shutdown),
           'onroad_conditions': onroad_conditions, 'startup_conditions': {'device_booted': True},
           'startup_conditions_prev': {}, 'startup_blocked_ts': None, 'started_ts': started_ts, 'in_car': True,
           'off_ts': 12.0 if started_ts is None else None, 'started_seen': True, 'cloudlog': mock.Mock(),
-          'jetlink_adapter': jetlink, 'time': clock, 'params': params}
+          'jetlink_adapter': jetlink, 'time': clock, 'params': params,
+          # the loop's decision statements, real but for the profile they are handed
+          'allows_automatic_power_down': allows_automatic_power_down,
+          'power_down_requested': power_down_requested, 'hardware_profile': profile}
     exec(self.init, ns)
     self.assertIsNone(ns['accelerator_off_ts'])
     down_at, started = [], []
@@ -677,6 +692,18 @@ class HardwaredPowersOffWithoutStopping(OpenpilotTestCase):
     r = self.run_loops(4, should_shutdown=False)
     self.assertEqual(r.jetlink.requests, [])
     self.assertIsNone(r.down_at)
+
+  def test_on_c3xl_the_settings_ui_still_powers_it_off(self):
+    # this device's profile: allows_automatic_power_down(C3XL) is False, so the
+    # battery/deadline answer never reaches the handshake here and ForcePowerDown
+    # is the path that does. The veto holds at the call site without swallowing
+    # the manual one
+    r = self.run_loops(4, profile=HardwareProfile.C3XL)
+    self.assertEqual(r.jetlink.requests, [])
+    self.assertIsNone(r.down_at)
+    r = self.run_loops(2, profile=HardwareProfile.C3XL, force_power_down=True)
+    self.assertEqual(r.jetlink.requests, ['comma shutting down, offroad since 12.0'])
+    self.assertFalse(r.params.get_bool('DoShutdown'), "the ask is out; DoShutdown waits for the owner or the 25 s")
 
 
 class StockModeld(Footprint, OpenpilotTestCase):

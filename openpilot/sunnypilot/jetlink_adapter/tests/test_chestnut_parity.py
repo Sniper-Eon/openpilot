@@ -74,6 +74,24 @@ class TestLinkStaysOff(OpenpilotTestCase):
     self.assertEqual(probe.call_count, 1)
 
 
+class _Slots:
+  """Params enough for the bundle validation: what it reads, writes and drops."""
+
+  def __init__(self, values):
+    self.values = dict(values)
+    self.removed: list[str] = []
+
+  def get(self, key, *a, **kw):
+    return self.values.get(key)
+
+  def put(self, key, value, block=False):
+    self.values[key] = value
+
+  def remove(self, key):
+    self.removed.append(key)
+    self.values.pop(key, None)
+
+
 class TestPickKeptDefaultDrives(OpenpilotTestCase):
   """A chestnut pick whose files are not here runs as the Default big model."""
 
@@ -100,6 +118,21 @@ class TestPickKeptDefaultDrives(OpenpilotTestCase):
     self.assertIsNone(self.active())
     self.assertIn(helpers.ACTIVE_BUNDLE_KEYS['chestnut'], self.params)
 
+  def test_validation_keeps_the_big_pick_it_cannot_look_for_yet(self):
+    # the other half of the same contract: the pick is stored without its files on
+    # purpose (the accelerator fetches its own representation, and a chestnut's
+    # files are fetched by ModelManagerSP._fetch_big_model_files after this
+    # validation runs). Resetting the big slot here would leave that fetch nothing
+    # to do, so only the small slot's missing files are a reset
+    raw = self.params[helpers.ACTIVE_BUNDLE_KEYS['chestnut']]
+    listed = [helpers._parse_active_bundle(raw)]
+    for source in ('chestnut', 'qcom'):
+      key = helpers.ACTIVE_BUNDLE_KEYS[source]
+      store = _Slots({key: raw})
+      helpers._LAST_VALIDATED_RAW.clear()
+      helpers._validate_active_bundle(store, source, listed)
+      self.assertEqual(store.removed, [] if source == 'chestnut' else [key], source)
+
   def test_the_pick_drives_once_its_files_are_here(self):
     import os
     open(os.path.join(self.root, 'ctv3.pkl'), 'wb').close()
@@ -112,8 +145,20 @@ class TestPickKeptDefaultDrives(OpenpilotTestCase):
     self.assertIsNone(self.active())
 
   def test_without_a_chestnut_the_small_slot_is_what_runs(self):
+    # an empty small slot is not "nothing" on this branch when the big slot holds a
+    # pick: jetlink stores the accelerator's own big model in
+    # ModelManager_ActiveBundleChestnut (jetlink_adapter.KEYS.big_model) and the
+    # branch runs the compiled default through modeld_v2 rather than handing modeld
+    # a bundle whose files the accelerator fetches for itself. That bridge is
+    # helpers.bundled_qcom_fallback, spec'd by
+    # openpilot/sunnypilot/models/tests/test_bundled_fallback.py, and it is never
+    # the big pick (models/tests/test_manager_download.py's TestActiveBundleSelection)
     self.params[helpers.ACTIVE_BUNDLE_KEYS['qcom']] = None
-    self.assertIsNone(self.active(chestnut=False))
+    with mock.patch.object(helpers, 'bundled_qcom_fallback', return_value='CD210 (Bundled)') as fallback:
+      self.assertEqual(self.active(chestnut=False), 'CD210 (Bundled)')
+    fallback.assert_called_once_with()
+    self.params.clear()
+    self.assertIsNone(self.active(chestnut=False), "no pick in either slot is the hardware default, which stock modeld runs")
 
 
 if __name__ == '__main__':
