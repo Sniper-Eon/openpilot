@@ -63,6 +63,19 @@ def big_model_state() -> str | None:
           ChestnutState.WAITING: 'ready'}.get(ui_state.chestnut_state)
 
 
+def big_model_progress() -> tuple[str, float, str] | None:
+  """(stage, 0..1, message) while an accelerator is working, else None. The message
+  is carried because a stage like "waiting for the accelerator" has no meaningful fraction"""
+  jetlink = ui_state.jetlink
+  progress = jetlink.progress if jetlink is not None else None
+  if not progress:
+    return None
+  stage = str(progress.get('stage', ''))
+  if stage in ('', 'ready'):
+    return None
+  return stage, float(progress.get('frac', 0.0)), str(progress.get('msg', ''))
+
+
 def carrying_model() -> tuple[str | None, str | None, str | None]:
   """(source, internal name, display name) of what actually drives. Runner-matched:
   when a Default big cannot carry, stock modeld runs the Default small, never the

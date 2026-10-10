@@ -12,6 +12,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.prime_state import PrimeState
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.hardware import HARDWARE, PC
+from openpilot.common.hardware.usb import TYPEC_CC_ORIENTATION_PATH, get_usb_state, is_chestnut_usb_id, read_int
 from openpilot.sunnypilot.models.artifact_status import chestnut_model_ready
 
 from openpilot.selfdrive.ui.sunnypilot.ui_state import UIStateSP, DeviceSP
@@ -100,6 +101,12 @@ class UIState(UIStateSP):
     self.chestnut_active: bool | None = self.params.get("ChestnutActive")
     self.chestnut_loading: bool = self.params.get_bool("ChestnutLoading")
     self.chestnut_loading_progress = self._read_chestnut_loading_progress()
+    # the comma's USB-C CC pin, which says a host is on the cable before any
+    # gadget enumerates: jetlink's accelerator, or something nobody named
+    self.usb_connected: bool = False
+    self.usb_connected_ts: float | None = None
+    self.usb_disconnected_ts: float | None = None
+    self.usb_unknown: bool = False
     self.chestnut_state = ChestnutState.DISCONNECTED
     self.started: bool = False
     self.ignition: bool = False
@@ -301,6 +308,29 @@ class UIState(UIStateSP):
     self.chestnut_active = self.params.get("ChestnutActive")
     self.chestnut_loading = self.params.get_bool("ChestnutLoading")
     self.chestnut_loading_progress = self._read_chestnut_loading_progress()
+
+    # the CC pin tells of a host on the cable; what is on it only the bus or
+    # jetlink can say. The comma is the gadget here and enumerates nothing, so
+    # a port that stays up with neither is a device the UI cannot name
+    now = time.monotonic()
+    if read_int(TYPEC_CC_ORIENTATION_PATH) != 0:
+      self.usb_disconnected_ts = None
+      if not self.usb_connected:
+        self.usb_connected = True
+        self.usb_connected_ts = now
+        self.usb_unknown = False
+      elif self.usb_connected_ts is not None and now - self.usb_connected_ts > 10.:
+        # the comma is the gadget for an off-board accelerator and enumerates nothing
+        self.usb_unknown = not (self.jetlink_view is not None or
+                                any(is_chestnut_usb_id(d["vendorId"], d["productId"], True) for d in get_usb_state()))
+        self.usb_connected_ts = None
+    elif self.usb_connected:
+      if self.usb_disconnected_ts is None:
+        self.usb_disconnected_ts = now
+      elif now - self.usb_disconnected_ts > PARAM_UPDATE_TIME:
+        self.usb_connected = False
+        self.usb_connected_ts = None
+        self.usb_unknown = False
 
     UIStateSP.update_params(self)
 

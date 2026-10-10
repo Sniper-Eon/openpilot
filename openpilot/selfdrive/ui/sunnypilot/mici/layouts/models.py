@@ -15,9 +15,9 @@ from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigMultiToggle
 from openpilot.selfdrive.ui.ui_state import ui_state, device
 from openpilot.selfdrive.ui.sunnypilot.accelerator_link import LINK_MODES, LINK_PARAM, link_mode, link_setting_available, \
   link_toggle_meaningful
-from openpilot.selfdrive.ui.sunnypilot.model_info import (active_source, big_model_state, bundles_for_source, carrying_model,
-                                                           default_model_name, model_cache_size_mb, model_info, queued_name,
-                                                           refresh_in_progress, refresh_model_list)
+from openpilot.selfdrive.ui.sunnypilot.model_info import (active_source, big_model_progress, big_model_state, bundles_for_source,
+                                                           carrying_model, default_model_name, model_cache_size_mb, model_info,
+                                                           queued_name, refresh_in_progress, refresh_model_list)
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import tr
 from openpilot.system.ui.widgets import Widget
@@ -76,6 +76,17 @@ def _model_info() -> tuple[str, str, str]:
     big = get_selected_bundle(ui_state.params, "chestnut")
     carry_display = big.displayName if big else default_model_name("chestnut")
   active_text = (carry_display or active_name).lower()
+  # the accelerator's own words while it provisions, ahead of the icon states
+  # below: "building 42%" says more than the icon's "getting ready"
+  provisioning = big_model_progress()
+  if provisioning is not None:
+    stage, frac, msg = provisioning
+    if stage == 'failed':
+      return active_text, tr("big model"), tr("unavailable")
+    # "waiting for the accelerator" says more than "connect 0%"; no percentage for a stage
+    # with nothing to measure
+    detail = tr(msg) if msg else tr(stage)
+    return active_text, tr("big model"), f"{detail} {frac * 100:.0f}%" if frac > 0 else detail
   if state == 'failed':
     return active_text, tr("big model"), tr("unavailable")
   if state == 'loading':

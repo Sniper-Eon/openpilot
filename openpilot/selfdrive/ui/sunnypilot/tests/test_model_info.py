@@ -64,6 +64,22 @@ def test_model_info_uses_chestnut_slot_while_egpu_is_active(monkeypatch):
   assert model_info.carrying_model() == ("chestnut", "BIG", "BIG display")
 
 
+def test_big_model_progress_is_the_working_stage_only(monkeypatch):
+  """The accelerator's telemetry, which the panels show in place of the icon
+  states: nothing at all without a snapshot, and none for a finished stage."""
+  for progress, expected in ((None, None),
+                             ({'stage': 'ready', 'frac': 1.0, 'msg': 'engine ready'}, None),
+                             ({'stage': '', 'frac': 0.0, 'msg': ''}, None),
+                             ({'stage': 'connect', 'frac': 0.0, 'msg': 'waiting for the accelerator'},
+                              ('connect', 0.0, 'waiting for the accelerator')),
+                             ({'stage': 'build', 'frac': 0.5, 'msg': 'building'}, ('build', 0.5, 'building'))):
+    monkeypatch.setattr(model_info, "ui_state", ns(jetlink=ns(progress=progress)))
+    assert model_info.big_model_progress() == expected
+
+  monkeypatch.setattr(model_info, "ui_state", ns(jetlink=None))
+  assert model_info.big_model_progress() is None
+
+
 def test_custom_big_failure_does_not_claim_a_small_bundle_fallback(monkeypatch):
   chestnut = _bundle("BIG")
   params = FakeParams({"ModelManager_ActiveBundleChestnut": chestnut.to_dict()})

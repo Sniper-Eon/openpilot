@@ -187,10 +187,10 @@ class UIStateSP:
     # on the 5 Hz params pass, not per frame in a layout; a fitted chestnut owns chestnut_state
     self.jetlink = None if self.sm['deviceState'].chestnutPresent else jetlink_adapter.status()
     self._enforce_usb_port()
-    # NOTE: the source branch also clears its usb_unknown flag here when a late
-    # gadget shows up ((view := self.jetlink_view) is not None and view.present).
-    # This fork's ui_state has no USB CC-pin tracking (usb_connected/usb_unknown),
-    # so there is no such flag to clear; the mici home USB icon is not ported.
+    # the Jetson configures the gadget ~25 s after a cold boot, after the one-shot
+    # usb_unknown decision; recognizing it late still clears "unknown"
+    if (view := self.jetlink_view) is not None and view.present and self.usb_unknown:
+      self.usb_unknown = False
     self.blindspot = self.params.get_bool("BlindSpot")
     self.chevron_metrics = self.params.get("ChevronInfo")
     self.custom_interactive_timeout = self.params.get("InteractivityTimeout", return_default=True)

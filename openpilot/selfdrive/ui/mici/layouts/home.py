@@ -141,6 +141,7 @@ class MiciHomeLayout(Widget):
     self._version_text = self._get_version_text()
 
     self._experimental_icon = IconWidget("icons_mici/experimental_mode.png", (48, 48))
+    self._usb_icon = IconWidget("icons_mici/usb.png", (62, 40))
     self._egpu_icon = IconWidget("icons_mici/egpu_green.png", (50, 37))
     self._egpu_icon_gray = IconWidget("icons_mici/egpu_gray.png", (50, 37))
     self._mic_icon = IconWidget("icons_mici/microphone.png", (32, 46))
@@ -152,6 +153,7 @@ class MiciHomeLayout(Widget):
       IconWidget("icons_mici/settings.png", (48, 48), opacity=0.9),
       NetworkIcon(),
       self._experimental_icon,
+      self._usb_icon,
       self._egpu_icon,
       self._egpu_icon_gray,
       self._body_icon,
@@ -250,6 +252,10 @@ class MiciHomeLayout(Widget):
 
     # ***** Center-aligned bottom section icons *****
     self._experimental_icon.set_visible(ui_state.experimental_mode)
+    # a host on the cable that neither the bus nor jetlink has named: the eGPU
+    # pair below still speaks for what this branch can identify, so only the
+    # unnamed port device takes the generic icon
+    self._usb_icon.set_visible(ui_state.usb_connected and ui_state.usb_unknown)
     egpu_connected = resolve_egpu_connection(ui_state.sm["deviceState"])
     self._egpu_icon.set_visible(egpu_connected and ui_state.usbgpu_compiled)
     self._egpu_icon_gray.set_visible(egpu_connected and not ui_state.usbgpu_compiled)
