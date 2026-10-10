@@ -25,6 +25,7 @@ from openpilot.selfdrive.ui.onroad.accelerator_indicator import (
   bundle_model_name,
   draw_accelerator_indicator,
   indicator_colors,
+  indicator_pill_width,
   should_show_accelerator_indicator,
 )
 
@@ -223,13 +224,34 @@ def test_a_fitted_chestnut_stays_quiet_through_the_full_reader():
 
 # -- the drawing ---------------------------------------------------------------
 
-def test_the_style_sits_under_the_max_box_and_off_the_bottom_panel():
+def test_the_style_sits_in_the_lower_left_clear_of_the_corner_widgets():
+  """The pill moved from under MAX to the lower left. What is down there has
+  to be cleared: the torque bar's arc (leftmost pixel x=669, topmost y=813 at
+  full lock on the comma 3X), the developer UI's bottom bar (y=1019..1080,
+  full width) and the rocket-fuel strip along the left edge (x=0..28)."""
   style = accelerator_indicator_style()
   height = style.line_height * 2 + style.padding
-  # MAX's box is y=45..249 on the comma 3X; the pill starts below it
-  assert style.offset_y >= 249
-  # and its foot stays in the top half, clear of the eGPU panel's bottom rows
-  assert style.offset_y + height < 1080 * 0.5
+  foot = 1080 - style.bottom_margin
+  # in the lower half, not under MAX (which is y=45..249) any more
+  assert foot > 1080 * 0.5
+  # clear of the torque bar's arc, which tops out at y=813...
+  assert foot < 813
+  # ...and of the developer UI's bottom bar, which is below the pill
+  assert foot <= 1080 - 61
+  # the left margin clears the rocket-fuel strip and keeps the MAX box's column
+  assert style.left_margin >= 28
+  # the foot is the pill's bottom edge, so the margin has to hold it
+  assert style.bottom_margin >= height
+
+
+def test_the_pill_is_wide_enough_for_whichever_line_is_longer():
+  """The detail row carries the model's name and a sentence; sized from the
+  headline alone it ran out of the pill, which the corner cannot afford."""
+  style = accelerator_indicator_style()
+  assert indicator_pill_width(style, 100.0, 400.0) == int(400.0) + style.padding * 2
+  assert indicator_pill_width(style, 500.0, 100.0) == int(500.0) + style.padding * 2
+  # and never narrower than the floor, however short the words
+  assert indicator_pill_width(style, 1.0, 1.0) == style.min_width
 
 
 def test_drawing_every_level_does_not_raise():

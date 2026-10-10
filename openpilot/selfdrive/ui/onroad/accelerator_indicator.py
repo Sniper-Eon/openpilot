@@ -8,7 +8,7 @@ frame. Until now the UI only folded it into the chestnut icon's state, where
 window to take over" are one green icon apart. On the road that is the whole
 question: ready-but-never-taken means the link works and the handover does not.
 
-So the indicator draws the state as words, in the top left under MAX, and only
+So the indicator draws the state as words, in the bottom left, and only
 where an accelerator is actually in play: no chestnut fitted (a board runs the
 large model itself, upstream's icon says so) and either the link is on, a
 far end is present, or the published state is one only an accelerator writes.
@@ -63,16 +63,27 @@ class AcceleratorIndicatorStyle:
   line_height: int
   padding: int
   min_width: int
-  offset_x: int
-  offset_y: int
+  left_margin: int
+  bottom_margin: int
 
 
 def accelerator_indicator_style() -> AcceleratorIndicatorStyle:
-  # under the MAX box (y=45..249) and under a speed-limit sign beside it
-  # (which reaches y=261): the comma 3X's header has room for one more row
-  # there and nothing else draws in it
+  # the comma 3X's lower left: 60 px in from the left edge, with the pill's
+  # foot 320 px up from the bottom. The left column is the emptiest part of the
+  # 2160x1080 onroad screen; what else is down here is centred or on the right,
+  # and the margin clears the three things that are not.
+  #  - The side bar's column is the left edge itself. The pill is anchored to
+  #    the content rect, so it slides right with the road view when the bar is
+  #    shown rather than hiding under it.
+  #  - The torque bar's arc (scale 3, radius 1200*3, a 12.7 degree span) hugs
+  #    the bottom centre: its leftmost pixel is x=669 and its topmost y=813 at
+  #    full lock, so the pill's foot stops above it even where their columns
+  #    overlap. The bar is drawn after the HUD, so an overlap would paint over
+  #    the words rather than under them.
+  #  - The developer UI's bottom bar (y=1019..1080, full width) is below both.
+  # The rocket-fuel strip (x=0..28) and the eGPU icon's corner are elsewhere.
   return AcceleratorIndicatorStyle(font_size=44, line_height=56, padding=20, min_width=420,
-                                   offset_x=60, offset_y=310)
+                                   left_margin=60, bottom_margin=320)
 
 
 def bundle_model_name(bundle) -> str:
@@ -188,8 +199,18 @@ def indicator_colors(level: str, pulse: float = 1.0) -> tuple[rl.Color, rl.Color
           rl.Color(fill.r, fill.g, fill.b, int(fill.a * max(0.85, alpha))))
 
 
+def indicator_pill_width(style: AcceleratorIndicatorStyle, headline_width: float, detail_width: float) -> int:
+  """The pill wide enough for its widest line, from the two measured widths.
+
+  Both rows count: the detail carries the model's name and a sentence, so it is
+  the longer of the two on every state, and a box sized from the headline alone
+  would let it run out of the pill and across the road view. Under MAX there
+  was room for that; in the corner there is not."""
+  return max(style.min_width, int(max(headline_width, detail_width)) + style.padding * 2)
+
+
 def draw_accelerator_indicator(rect: rl.Rectangle, font: rl.Font, font_bold: rl.Font, *, pulse: float = 1.0) -> None:
-  """The pill itself, top left under the MAX box. `pulse` is 0..1, driven by
+  """The pill itself, in the bottom left of `rect`. `pulse` is 0..1, driven by
   the caller so the joining level can breathe."""
   from openpilot.system.ui.lib.text_measure import measure_text_cached
 
@@ -198,9 +219,16 @@ def draw_accelerator_indicator(rect: rl.Rectangle, font: rl.Font, font_bold: rl.
     return
 
   style = accelerator_indicator_style()
-  width = max(style.min_width, int(measure_text_cached(font_bold, status.headline, style.font_size).x) + style.padding * 2)
+  detail = f"{status.model} · {status.detail}" if status.model else status.detail
+  width = indicator_pill_width(
+    style,
+    measure_text_cached(font_bold, status.headline, style.font_size).x,
+    measure_text_cached(font, detail, style.font_size).x)
   height = style.line_height * 2 + style.padding
-  pill = rl.Rectangle(rect.x + style.offset_x, rect.y + style.offset_y, width, height)
+  # anchored to the bottom edge, so the pill keeps its margin from the corner
+  # whatever height the road view is given
+  pill = rl.Rectangle(rect.x + style.left_margin, rect.y + rect.height - style.bottom_margin - height,
+                      width, height)
   headline_color, detail_color, border_color, fill_color = indicator_colors(status.level, pulse)
 
   rl.draw_rectangle_rounded(pill, 0.25, 12, fill_color)
@@ -210,6 +238,5 @@ def draw_accelerator_indicator(rect: rl.Rectangle, font: rl.Font, font_bold: rl.
   text_x = pill.x + style.padding
   rl.draw_text_ex(font_bold, status.headline, rl.Vector2(text_x, pill.y + style.padding * 0.4),
                   style.font_size, 0, headline_color)
-  detail = f"{status.model} · {status.detail}" if status.model else status.detail
   rl.draw_text_ex(font, detail, rl.Vector2(text_x, pill.y + style.padding * 0.4 + style.line_height),
                   style.font_size, 0, detail_color)
