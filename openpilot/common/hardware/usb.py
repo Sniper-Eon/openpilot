@@ -88,6 +88,7 @@ def get_usb_state() -> list[dict]:
       "speedMbps": read_int(device / "speed"),
       "manufacturer": read(device / "manufacturer") or "",
       "product": read(device / "product") or "",
+      "serial": read(device / "serial") or "",
       "linkErrorCount": read_int(ctrl / "portli", 0) & 0xFFFF if ctrl is not None else 0,
       "usb3Lane": {1: "a", 2: "b"}.get(typec_orientation, "unknown") if ctrl is not None and ctrl.name == PRIMARY_USB_CONTROLLER else "unknown",
     })

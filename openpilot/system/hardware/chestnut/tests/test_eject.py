@@ -181,12 +181,12 @@ def test_automatic_power_down_waits_for_users_without_changing_manual_status(mon
 
 
 def test_offroad_runtime_device_starts_one_automatic_power_down(monkeypatch):
-  params = FakeParams({"IsOffroad": True})
+  params = FakeParams({"IsOffroad": True, "ChestnutWakeCapableSerials": ["wake-dock"]})
   ejector = ChestnutEjector(params)
   start = Mock()
   monkeypatch.setattr(ejector, "_start", start)
   present = [{"vendorId": 0x3801, "productId": 0x0001, "manufacturer": "tiny",
-              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000}]
+              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000, "serial": "wake-dock"}]
 
   ejector.update(True, present, auto_power_down=True)
   ejector.update(True, present, auto_power_down=True)
@@ -194,6 +194,36 @@ def test_offroad_runtime_device_starts_one_automatic_power_down(monkeypatch):
   start.assert_called_once_with(automatic=True)
   assert ejector.auto_power_down_attempted
   assert params.get("UsbGpuEjectStatus") is None
+
+
+def test_unknown_dock_keeps_power_on(monkeypatch):
+  params = FakeParams({"IsOffroad": True, "ChestnutWakeCapableSerials": ["wake-dock"]})
+  ejector = ChestnutEjector(params)
+  start = Mock()
+  monkeypatch.setattr(ejector, "_start", start)
+  present = [{"vendorId": 0x3801, "productId": 0x0001, "manufacturer": "tiny",
+              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000, "serial": "always-on-dock"}]
+
+  ejector.update(True, present, auto_power_down=True)
+  ejector.update(True, [{k: v for k, v in present[0].items() if k != "serial"}], auto_power_down=True)
+
+  start.assert_not_called()
+  assert not ejector.auto_power_down_attempted
+
+
+def test_switching_docks_selects_registered_power_policy(monkeypatch):
+  params = FakeParams({"IsOffroad": True, "ChestnutWakeCapableSerials": ["wake-dock"]})
+  ejector = ChestnutEjector(params)
+  start = Mock()
+  monkeypatch.setattr(ejector, "_start", start)
+  device = {"vendorId": 0x3801, "productId": 0x0001, "manufacturer": "tiny",
+            "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000}
+
+  ejector.update(True, [{**device, "serial": "always-on-dock"}], auto_power_down=True)
+  ejector.update(True, [], auto_power_down=True)
+  ejector.update(True, [{**device, "serial": "wake-dock"}], auto_power_down=True)
+
+  start.assert_called_once_with(automatic=True)
 
 
 def test_initial_offroad_does_not_automatically_power_down(monkeypatch):
@@ -289,12 +319,12 @@ def test_manual_eject_remains_available_before_first_onroad(monkeypatch):
 
 
 def test_automatic_power_down_does_not_block_hardwared_update(monkeypatch):
-  params = FakeParams({"IsOffroad": True})
+  params = FakeParams({"IsOffroad": True, "ChestnutWakeCapableSerials": ["wake-dock"]})
   ejector = ChestnutEjector(params)
   entered = threading.Event()
   release = threading.Event()
   present = [{"vendorId": 0x3801, "productId": 0x0001, "manufacturer": "tiny",
-              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000}]
+              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000, "serial": "wake-dock"}]
 
   def block_in_worker(*, automatic):
     assert automatic
@@ -311,12 +341,12 @@ def test_automatic_power_down_does_not_block_hardwared_update(monkeypatch):
 
 
 def test_automatic_power_down_rearms_after_disconnect(monkeypatch):
-  params = FakeParams({"IsOffroad": True})
+  params = FakeParams({"IsOffroad": True, "ChestnutWakeCapableSerials": ["wake-dock"]})
   ejector = ChestnutEjector(params)
   start = Mock()
   monkeypatch.setattr(ejector, "_start", start)
   present = [{"vendorId": 0x3801, "productId": 0x0001, "manufacturer": "tiny",
-              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000}]
+              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000, "serial": "wake-dock"}]
 
   ejector.update(True, present, auto_power_down=True)
   ejector.update(True, [], auto_power_down=True)
@@ -326,12 +356,12 @@ def test_automatic_power_down_rearms_after_disconnect(monkeypatch):
 
 
 def test_automatic_power_down_requires_manager_offroad_confirmation(monkeypatch):
-  params = FakeParams()
+  params = FakeParams({"ChestnutWakeCapableSerials": ["wake-dock"]})
   ejector = ChestnutEjector(params)
   start = Mock()
   monkeypatch.setattr(ejector, "_start", start)
   present = [{"vendorId": 0x3801, "productId": 0x0001, "manufacturer": "tiny",
-              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000}]
+              "product": "custom ed4e39b7-CLEAN", "speedMbps": 5000, "serial": "wake-dock"}]
 
   ejector.update(True, present, auto_power_down=True)
   start.assert_not_called()

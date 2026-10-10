@@ -92,6 +92,10 @@ class ChestnutEjector:
     detected = any((d["vendorId"], d["productId"]) in CHESTNUT_USB_IDS + CHESTNUT_ROM_USB_IDS for d in usb_state)
     runtime_detected = any(is_chestnut_runtime_device(d) for d in usb_state)
     ready = any(is_chestnut_runtime_device(d) and d.get("speedMbps", 0) == 5000 for d in usb_state)
+    wake_capable_serials = self.params.get("ChestnutWakeCapableSerials") or []
+    wake_capable = isinstance(wake_capable_serials, list) and any(
+      is_chestnut_runtime_device(d) and d.get("serial", "") in wake_capable_serials for d in usb_state
+    )
     status = self.params.get("UsbGpuEjectStatus")
 
     low_speed = runtime_detected and not ready
@@ -132,7 +136,7 @@ class ChestnutEjector:
       self._start_low_speed_recovery()
       return
 
-    if not (auto_power_down and offroad and self.params.get_bool("IsOffroad") and runtime_detected):
+    if not (auto_power_down and wake_capable and offroad and self.params.get_bool("IsOffroad") and runtime_detected):
       return
     if self.auto_power_down_attempted or (self.thread is not None and self.thread.is_alive()):
       return
