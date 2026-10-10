@@ -2762,3 +2762,51 @@ msgstr ""
 #: openpilot/selfdrive/ui/sunnypilot/layouts/settings/models.py
 msgid "{} will drive. If it fails during a drive, {} takes over until the next drive."
 msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is driving"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Handed over: the accelerator runs this model now"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is ready"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Loaded, waiting for a takeover window"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is joining"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Link is up, the accelerator has not taken over"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is retrying"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Join failed, the accelerator is trying again"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model unavailable"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "The accelerator reported the link cannot run"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Small model is driving"
+msgstr ""
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "No accelerator state published yet"
+msgstr ""
