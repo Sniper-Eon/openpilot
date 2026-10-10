@@ -271,7 +271,7 @@ class ModelManagerSP:
 
   async def _download_bundle(self, model_bundle: custom.ModelManagerSP.ModelBundle, destination_path: str, source: str) -> None:
     self.selected_bundle = model_bundle
-    models = [] if source == "chestnut" and not self.chestnut_present else self.selected_bundle.models
+    models = self.selected_bundle.models
     if models:
       self.selected_bundle.status = custom.ModelManagerSP.DownloadStatus.downloading
       for model in models:

@@ -419,19 +419,23 @@ class TestManagerDownload(ManagerDownloadTestBase):
       assert missing == [], f"chunks missing from the cache: {missing}"
     self.run_with_server(body)
 
-  def test_download_writes_chestnut_slot(self):
-    """A download resolved to the chestnut source writes the chestnut active bundle slot only."""
+  def test_download_writes_chestnut_slot_without_hardware(self):
+    """Big models download to the C3 cache even when the Chestnut is unplugged."""
     def body():
-      self.make_artifact(chunked=True)
+      artifact = self.make_artifact(chunked=True)
       self._bundle.ref = "big-ref"
       self._bundle.minimumSelectorVersion = helpers.REQUIRED_JSON_VERSION
       params, store = self._make_params_with_store()
       self.manager.params = params
+      self.manager.chestnut_present = False
       asyncio.run(self.manager._download_bundle(self._bundle, self.dest, "chestnut"))
 
       assert "ModelManager_ActiveBundleChestnut" in store, "chestnut download must write the chestnut slot"
       assert "ModelManager_ActiveBundle" not in store, "chestnut download must not touch the qcom slot"
       assert self.manager.selected_bundle.status == custom.ModelManagerSP.DownloadStatus.downloaded
+      chunk_names = [get_chunk_name(artifact.fileName, i, len(artifact.chunks)) for i in range(len(artifact.chunks))]
+      assert all(os.path.isfile(os.path.join(self.dest, name)) for name in chunk_names), \
+        "unplugged Chestnut must not suppress the model file download"
     self.run_with_server(body)
 
 
