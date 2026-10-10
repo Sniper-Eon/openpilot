@@ -795,9 +795,8 @@ class ModeldTinygrad(Footprint, OpenpilotTestCase):
     self.assertEqual(lines(self.src), lines(MODELD.read_text()))
 
   def test_driving_model_data_says_which_model_drove(self):
-    # the qlog's only model message: stock modeld copies modelV2.big into it
-    # (fill_driving_model_data), and modeld_v2 fills its own
-    self.assertIn("drivingdata_send.drivingModelData.big = model.chestnut", self.src)
+    self.assertIn("modelv2_send.modelV2.big = model.chestnut", self.src)
+    self.assertNotIn("drivingdata_send.drivingModelData.big", self.src)
 
 
 if __name__ == '__main__':
