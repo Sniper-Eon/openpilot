@@ -139,7 +139,7 @@ class ModelCache:
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v22.json"
-  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v25.json"
+  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v27.json"
 
   MODEL_SOURCES = {
     "qcom": (MODEL_URL, ""),
@@ -172,7 +172,11 @@ class ModelFetcher:
     """
     model_url, _ = self.MODEL_SOURCES[source]
     try:
-      response = requests.get(model_url, timeout=10)
+      # 60 s, not 10: these two catalogs are ~100 KB, and on a slow route to
+      # raw.githubusercontent.com a 10 s read budget expires and the manager
+      # silently keeps the expired cache - which is how a device ends up
+      # unable to see models the accelerator side offers (e.g. CTV3M).
+      response = requests.get(model_url, timeout=60)
 
       # Explicitly handle 404 differently
       if response.status_code == 404:
