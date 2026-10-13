@@ -32,7 +32,7 @@ def local_position_std_m(location) -> float:
   position_ecef = location.positionECEF
   if not position_ecef.valid or len(position_ecef.std) < 3:
     return math.inf
-  values = tuple(float(value) for value in position_ecef.std[:3])
+  values = tuple(float(position_ecef.std[i]) for i in range(3))
   if not all(math.isfinite(value) and value >= 0.0 for value in values):
     return math.inf
   return math.sqrt(sum(value * value for value in values))
