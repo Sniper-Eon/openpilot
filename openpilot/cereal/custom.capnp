@@ -302,6 +302,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
     sccVision @1;
     sccMap @2;
     speedLimitAssist @3;
+    navAssist @4;
   }
 
   struct E2eAlerts {
@@ -615,13 +616,199 @@ struct TrafficRadarState @0xcb9fd56c7057593a {
   stopSafetyAllowed @32 :Bool;  # All STOP gates except raw CAN freshness.
 }
 
-struct CustomReserved11 @0xc2243c65e0340384 {
+struct NavAssistStateSP @0xc2243c65e0340384 {
+  publishMonoTime @0 :UInt64;
+  receiveMonoTime @1 :UInt64;
+  sourceWallTimeMs @2 :UInt64;
+  sequence @3 :UInt64;
+  routeRevision @4 :UInt64;
+  maneuverEventId @5 :UInt64;
+  sessionId @6 :Text;
+  source @7 :Source;
+  mode @8 :Mode;
+  coordinateSystem @9 :CoordinateSystem;
+  valid @10 :Bool;
+  stale @11 :Bool;
+  routeActive @12 :Bool;
+  routeMatched @13 :Bool;
+  gpsWeak @14 :Bool;
+  latitude @15 :Float64;
+  longitude @16 :Float64;
+  locationAccuracyM @17 :Float32;
+  bearingDeg @18 :Float32;
+  speedKph @19 :Float32;
+  locationObservedAtMs @20 :UInt64;
+  currentStepIndex @21 :Int32 = -1;
+  currentLinkIndex @22 :Int32 = -1;
+  currentPointIndex @23 :Int32 = -1;
+  maneuver @24 :Maneuver;
+  maneuverDistanceM @25 :Float32;
+  nextManeuver @26 :Maneuver;
+  nextManeuverDistanceM @27 :Float32;
+  advisorySpeedValid @28 :Bool;
+  advisorySpeedMps @29 :Float32;
+  roadClass @30 :Int16 = -1;
+  roadType @31 :Int16 = -1;
+  currentRoad @32 :Text;
+  nextRoad @33 :Text;
+  laneGuidanceObservedAtMs @34 :UInt64;
+  lanes @35 :List(LaneGuidance);
+  sourceAgeMs @36 :Float32;
+  rejectReason @37 :RejectReason;
+  guidanceObservedAtMs @38 :UInt64;
+  trackGeofenceValidDEPRECATED @39 :Bool;
+
+  struct LaneGuidance {
+    index @0 :UInt8;
+    allowedActions @1 :UInt16;
+    recommendedActions @2 :UInt16;
+    recommended @3 :Bool;
+  }
+
+  enum Source {
+    unknown @0;
+    android @1;
+    ios @2;
+    track @3;
+  }
+
+  enum Mode {
+    idle @0;
+    routePlanned @1;
+    realtime @2;
+    simulation @3;
+    arrived @4;
+    recalculating @5;
+  }
+
+  enum CoordinateSystem {
+    unknown @0;
+    gcj02 @1;
+    wgs84 @2;
+  }
+
+  enum Maneuver {
+    none @0;
+    straight @1;
+    slightLeft @2;
+    slightRight @3;
+    turnLeft @4;
+    turnRight @5;
+    sharpLeft @6;
+    sharpRight @7;
+    uTurnLeft @8;
+    uTurnRight @9;
+    keepLeft @10;
+    keepRight @11;
+    mergeLeft @12;
+    mergeRight @13;
+    exitLeft @14;
+    exitRight @15;
+    rampLeft @16;
+    rampRight @17;
+    roundabout @18;
+    destination @19;
+    unknown @20;
+  }
+
+  enum RejectReason {
+    none @0;
+    disabled @1;
+    noData @2;
+    authentication @3;
+    malformed @4;
+    replay @5;
+    stale @6;
+    routeUnmatched @7;
+    gpsWeak @8;
+    outsideTrackDEPRECATED @9;
+    localLocalization @10;
+    phoneLocalization @11;
+    guidanceStale @12;
+  }
 }
 
-struct CustomReserved12 @0x9ccdc8676701b412 {
+struct LaneTopologyStateSP @0x9ccdc8676701b412 {
+  publishMonoTime @0 :UInt64;
+  modelMonoTime @1 :UInt64;
+  imageMonoTime @2 :UInt64;
+  frameId @3 :UInt32;
+  imageFrameId @4 :UInt32;
+  valid @5 :Bool;
+  stale @6 :Bool;
+  ambiguous @7 :Bool;
+  calibrationValid @8 :Bool;
+  topologyState @9 :TopologyState;
+  visibleLaneCount @10 :UInt8;
+  egoLaneIndexFromLeft @11 :Int8 = -1;
+  egoLaneIndexFromRight @12 :Int8 = -1;
+  leftNeighborExists @13 :Bool;
+  rightNeighborExists @14 :Bool;
+  leftMarking @15 :Marking;
+  rightMarking @16 :Marking;
+  leftBoundaryConfidence @17 :Float32;
+  rightBoundaryConfidence @18 :Float32;
+  leftMarkingConfidence @19 :Float32;
+  rightMarkingConfidence @20 :Float32;
+  leftEvidenceAgeMs @21 :Float32;
+  rightEvidenceAgeMs @22 :Float32;
+  sourcePairChanged @23 :Bool;
+  validForControl @24 :Bool;
+  leftEgoSideMarking @25 :Marking;
+  leftFarSideMarking @26 :Marking;
+  rightEgoSideMarking @27 :Marking;
+  rightFarSideMarking @28 :Marking;
+  leftCrossingAllowed @29 :Bool;
+  rightCrossingAllowed @30 :Bool;
+  leftRawMarking @31 :Marking;
+  rightRawMarking @32 :Marking;
+  imageModelSkewMs @33 :Float32;
+  leftEvidenceValid @34 :Bool;
+  rightEvidenceValid @35 :Bool;
+
+  enum Marking {
+    unknown @0;
+    solid @1;
+    dashed @2;
+    doubleSolid @3;
+    doubleDashed @4;
+    solidDashed @5;
+    roadEdge @6;
+  }
+
+  enum TopologyState {
+    normal @0;
+    mergingLeft @1;
+    mergingRight @2;
+    splittingLeft @3;
+    splittingRight @4;
+    ambiguous @5;
+    stale @6;
+  }
 }
 
-struct CustomReserved13 @0xcd96dafb67a082d0 {
+struct NavLaneIntentSP @0xcd96dafb67a082d0 {
+  publishMonoTime @0 :UInt64;
+  valid @1 :Bool;
+  signalRequested @2 :Bool;
+  laneChangeAuthorized @3 :Bool;  # Deprecated; navigation never grants SP lane-change authority.
+  direction @4 :Direction;
+  requestId @5 :UInt64;
+  targetLaneIndex @6 :Int8 = -1;
+  routeRevision @7 :UInt64;
+  maneuverEventId @8 :UInt64;
+  reason @9 :Text;
+  sessionId @10 :Text;
+  spLaneChangeReady @11 :Bool;  # Diagnostic only: fresh dashed/BSM/lamp qualification observed.
+  forkNow @12 :Bool;  # Fresh exit/ramp/merge inside the bounded final-fork window.
+  allowUnknownCrossing @13 :Bool;  # SP policy input; never bypasses stale geometry or road edge.
+  ignoreSolidBoundary @14 :Bool;  # SP policy input for forkNow only; road edge remains non-crossable.
+
+  enum Direction {
+    none @0;
+    left @1;
+    right @2;
+  }
 }
 
 struct CustomReserved14 @0xb057204d7deadf3f {

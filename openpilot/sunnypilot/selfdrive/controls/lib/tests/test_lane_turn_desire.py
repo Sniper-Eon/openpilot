@@ -122,3 +122,24 @@ class TestDesireHelperIntegration(OpenpilotTestCase):
     assert dh.lane_change_state == LaneChangeState.preLaneChange
     assert dh.lane_change_direction == LaneChangeDirection.left
     assert dh.desire == log.Desire.none
+
+  def test_solid_line_blocks_signaled_lane_change_until_the_line_clears(self, set_lane_turn_params):
+    dh = DesireHelper()
+    dh.alc.lane_change_set_timer = AutoLaneChangeMode.NUDGE
+    carstate = DummyCarState(vEgo=15, leftBlinker=True, steeringPressed=True, steeringTorque=1)
+    for _ in range(10):
+      dh.update(
+        carstate, True, 1.0,
+        left_line_blocked=True, right_line_blocked=False,
+      )
+
+    assert dh.lane_change_state == LaneChangeState.preLaneChange
+    assert dh.lane_change_direction == LaneChangeDirection.left
+    assert dh.desire == log.Desire.none
+
+    dh.update(
+      carstate, True, 1.0,
+      left_line_blocked=False, right_line_blocked=False,
+    )
+    assert dh.lane_change_state == LaneChangeState.laneChangeStarting
+    assert dh.desire == log.Desire.laneChangeLeft

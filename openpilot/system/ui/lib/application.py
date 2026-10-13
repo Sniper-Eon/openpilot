@@ -709,7 +709,11 @@ class GuiApplication(GuiApplicationExt):
       codepoints = sorted(map(ord, chars))
       codepoint_buffer = rl.ffi.new("int[]", codepoints)
       with as_file(FONT_DIR) as fspath:
-        font = rl.load_font_ex((fspath / NOTO_FONTS[language]).as_posix(), 48,
+        font_path = fspath / NOTO_FONTS[language]
+        navigation_font = fspath / 'NotoSansCJKsc-Navigation.otf'
+        if language == 'zh-CHS' and navigation_font.is_file() and navigation_font.stat().st_size > 1024:
+          font_path = navigation_font
+        font = rl.load_font_ex(font_path.as_posix(), 48,
                                rl.ffi.cast("int *", codepoint_buffer), len(codepoints))
       rl.gen_texture_mipmaps(font.texture)
       rl.set_texture_filter(font.texture, rl.TextureFilter.TEXTURE_FILTER_TRILINEAR)

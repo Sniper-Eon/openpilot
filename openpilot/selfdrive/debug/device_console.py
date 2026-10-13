@@ -25,6 +25,8 @@ from openpilot.selfdrive.debug.device_log_download import (
   select_log_range,
   stream_log_zip,
 )
+from openpilot.selfdrive.debug.navigation_log_web import PANEL as NAVIGATION_LOG_PANEL, SCRIPT as NAVIGATION_LOG_SCRIPT
+from openpilot.sunnypilot.navassist.diagnostics import flush_recording, log_status as navigation_log_status, select_logs as select_navigation_logs, stream_logs as stream_navigation_logs
 from openpilot.selfdrive.debug.device_system_diagnostics import (
   MAX_SYSTEM_DIAGNOSTIC_BYTES,
   collect_system_diagnostics,
@@ -128,7 +130,7 @@ def render_page() -> bytes:
   </style>
 </head><body><main>
   <h1>车载设置</h1><p>连接设备局域网后可直接访问普通设置；任意 Bash 终端单独使用密码。</p>
-  <div class="tabs"><button class="tab active" id="settings-tab" onclick="showPanel('settings')">设置</button><button class="tab" id="driving-tab" onclick="showPanel('driving')">行驶信息</button><button class="tab" id="logs-tab" onclick="showPanel('logs')">日志下载</button><button class="tab" id="turn-tab" onclick="showPanel('turn')">Tesla 验证</button><button class="tab" id="terminal-tab" onclick="showPanel('terminal')">终端</button></div>
+  <div class="tabs"><button class="tab active" id="settings-tab" onclick="showPanel('settings')">设置</button><button class="tab" id="driving-tab" onclick="showPanel('driving')">行驶信息</button><button class="tab" id="logs-tab" onclick="showPanel('logs')">日志下载</button><button class="tab" id="navlogs-tab" onclick="showPanel('navlogs')">导航日志</button><button class="tab" id="turn-tab" onclick="showPanel('turn')">Tesla 验证</button><button class="tab" id="terminal-tab" onclick="showPanel('terminal')">终端</button></div>
   <section id="vehicle-panel" aria-label="Tesla 车辆信息">
     <div class="vehicle-head">TESLA <span id="vehicle-ip">IP —</span><span id="vehicle-connection">等待车辆</span></div><div id="vehicle-metrics"></div>
     <div class="vehicle-lights"><div class="vehicle-light-head"><div class="vehicle-label"><svg class="vehicle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 16c0-3-3-3-3-7a7 7 0 0 1 14 0c0 4-3 4-3 7M8 19h8m-6 3h4"/></svg>氛围灯</div><span>红色 · 3 秒</span></div>
@@ -151,6 +153,7 @@ def render_page() -> bytes:
     <div class="log-actions"><button onclick="previewLogs()">刷新范围</button><button id="log-download" onclick="downloadLogs()" disabled>打包并下载</button><button id="log-delete" onclick="deleteLogs()" disabled>清理所选日志</button></div>
     <div id="log-preview" class="notice">尚未选择日志范围</div>
   </section>
+  <!-- NAVIGATION_LOG_PANEL -->
   <section id="terminal-panel" hidden>
     <h1>设备终端</h1><p>仅在设置模式（非行驶状态）且设备端显式启用后可用。终端单独使用密码；命令最长 20 秒，输出上限 64 KiB。</p>
     <div id="terminal-state" class="notice">正在检查终端状态…</div><div class="terminal-row"><input id="terminal-password" type="password" autocomplete="off" placeholder="终端密码"><button onclick="runTerminal()">运行</button></div><div class="terminal-row"><input id="terminal-new-password" type="password" autocomplete="new-password" placeholder="新密码（4-64个字符）"><button onclick="changeTerminalPassword()">修改密码</button></div>
@@ -211,6 +214,8 @@ function setPedestrianCoordinateMode(value) { pedestrianCoordinateMode = value; 
 document.getElementById('pedestrian-coordinate-mode').value = pedestrianCoordinateMode;
 function showPanel(name) {
   currentPanel = name;
+  document.getElementById('navlogs-panel').hidden=name!=='navlogs';document.getElementById('navlogs-tab').classList.toggle('active',name==='navlogs');
+  if(name==='navlogs')loadNavigationLogs(true);
   document.getElementById('settings-panel').hidden = name !== 'settings'; document.getElementById('driving-panel').hidden = name !== 'driving'; document.getElementById('logs-panel').hidden = name !== 'logs'; document.getElementById('turn-panel').hidden = name !== 'turn'; document.getElementById('terminal-panel').hidden = name !== 'terminal';
   document.getElementById('settings-tab').classList.toggle('active', name === 'settings'); document.getElementById('driving-tab').classList.toggle('active', name === 'driving'); document.getElementById('logs-tab').classList.toggle('active', name === 'logs'); document.getElementById('turn-tab').classList.toggle('active', name === 'turn'); document.getElementById('terminal-tab').classList.toggle('active', name === 'terminal');
   if (name === 'driving') loadDrivingStatus();
@@ -253,6 +258,7 @@ function formatBytes(bytes) { if (!Number.isFinite(bytes)) return '—'; const u
 async function loadLogStatus() { const state=document.getElementById('log-state'),button=document.getElementById('log-download'),deleteButton=document.getElementById('log-delete');try{const response=await apiFetch('/api/logs/status',{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.message||'HTTP '+response.status);logsStatus=data;state.className='notice'+(data.onroad?' onroad':'');if(!data.available){state.textContent='没有找到可下载的 qlog 或本地诊断';button.disabled=true;deleteButton.disabled=true;return;}state.textContent=(data.onroad?'行驶中：仅可查看范围，禁止下载或清理。':'设置模式：可以打包下载或清理。')+' 可用范围：'+new Date(data.start_ms).toLocaleString()+' → '+new Date(data.end_ms).toLocaleString()+' · '+data.segment_count+' 个路线段 · '+data.local_diagnostic_count+' 个本地诊断文件';if(!logsInitialized){const end=data.end_ms,start=Math.max(data.start_ms,end-30*60*1000);document.getElementById('log-start').value=localTimeInput(start);document.getElementById('log-end').value=localTimeInput(end);logsInitialized=true;}await previewLogs();}catch(error){state.className='notice onroad';state.textContent='日志范围读取失败：'+error;button.disabled=true;deleteButton.disabled=true;} }
 async function previewLogs() { const preview=document.getElementById('log-preview'),button=document.getElementById('log-download'),deleteButton=document.getElementById('log-delete'),range=selectedLogRange();logsPreviewValid=false;button.disabled=true;deleteButton.disabled=true;if(!Number.isFinite(range.start)||!Number.isFinite(range.end)||range.end<=range.start){preview.className='notice onroad';preview.textContent='请选择有效的开始和结束时间';return;}try{const response=await apiFetch('/api/logs/preview?start_ms='+range.start+'&end_ms='+range.end,{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.message||'HTTP '+response.status);preview.className='notice';preview.textContent='qlog '+data.route_file_count+' 个 · 本地诊断 '+data.local_diagnostic_count+' 个 · '+formatBytes(data.total_bytes)+'\\n另附 onroad 阻挡记录和系统错误日志（最多 '+formatBytes(data.max_system_diagnostic_bytes)+'）；不包含 rlog 或视频。';logsPreviewValid=Boolean(data.includes_system_diagnostics)||data.file_count>0;const onroad=!logsStatus||Boolean(logsStatus.onroad);button.disabled=!logsPreviewValid||onroad;deleteButton.disabled=data.file_count<=0||onroad;}catch(error){preview.className='notice onroad';preview.textContent='日志范围无效：'+error;} }
 function downloadLogs() { if(!logsPreviewValid||logsStatus?.onroad)return;const range=selectedLogRange();window.location.assign('/api/logs/download?start_ms='+range.start+'&end_ms='+range.end); }
+/* NAVIGATION_LOG_SCRIPT */
 async function deleteLogs() { if(!logsPreviewValid||logsStatus?.onroad)return;const range=selectedLogRange();if(!confirm('确定永久删除所选时间范围内的 qlog、本地诊断及遗留 rlog？视频不会删除，此操作无法撤销。'))return;const button=document.getElementById('log-delete'),preview=document.getElementById('log-preview');button.disabled=true;preview.className='notice';preview.textContent='正在清理所选日志…';try{const response=await apiFetch('/api/logs/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({start_ms:range.start,end_ms:range.end,confirm:true})}),data=await response.json();if(!response.ok)throw new Error(data.message||'HTTP '+response.status);logsInitialized=false;await loadLogStatus();preview.className=data.skipped_files?.length?'notice onroad':'notice';preview.textContent='已清理 '+data.file_count+' 个日志文件 · 释放 '+formatBytes(data.total_bytes)+(data.skipped_files?.length?'\\n跳过 '+data.skipped_files.length+' 个已变化或不安全的文件。':'');}catch(error){preview.className='notice onroad';preview.textContent='日志清理失败：'+error;await previewLogs();} }
 function drawLine(ctx, points, xScale, yScale, color, width) { if (!points.length) return; ctx.beginPath(); points.forEach(([x,y], i) => { const px = ctx.canvas.clientWidth / 2 - y * yScale, py = ctx.canvas.clientHeight - 38 - x * xScale; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke(); }
 function drawModelLine(ctx, points, xScale, yScale, color, width) { if (!points.length) return; ctx.beginPath(); points.forEach(([x,y], i) => { const px = ctx.canvas.clientWidth / 2 + y * yScale, py = ctx.canvas.clientHeight - 38 - x * xScale; i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }); ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke(); }
@@ -435,7 +441,7 @@ async function pollStatus() { if (!activeTestId) return; try { const response = 
 async function cancelSession() { if (!activeTestId) return; document.getElementById('status').textContent = '正在请求关闭转向灯…'; try { await apiFetch('/api/cancel/' + activeTestId, {method:'POST'}); } catch (error) { finishTurnUi('取消请求失败：' + error); } }
 function finishTurnUi(message) { document.getElementById('status').textContent = message; document.querySelectorAll('#left,#right').forEach(button => button.disabled = false); document.getElementById('cancel').style.display = 'none'; activeTestId = null; }
 async function runSpeed(action) { const status = document.getElementById('status'); status.textContent = '正在发送速度按钮模板…'; try { const response = await apiFetch('/api/speed/' + action, {method:'POST'}); const result = await response.json(); if (!response.ok) throw new Error(result.message || '测试失败'); status.textContent = result.message; } catch (error) { status.textContent = '速度按钮测试失败：' + error; } }
-</script></main></body></html>""".encode()
+</script></main></body></html>""".replace('<!-- NAVIGATION_LOG_PANEL -->', NAVIGATION_LOG_PANEL).replace('/* NAVIGATION_LOG_SCRIPT */', NAVIGATION_LOG_SCRIPT).encode()
 
 
 class DeviceConsoleHandler(BaseHTTPRequestHandler):
@@ -497,6 +503,31 @@ class DeviceConsoleHandler(BaseHTTPRequestHandler):
     finally:
       _LOG_DOWNLOAD_LOCK.release()
 
+  def _navigation_download(self, start_ms: int, end_ms: int) -> None:
+    if not _LOG_DOWNLOAD_LOCK.acquire(blocking=False):
+      self._json(HTTPStatus.CONFLICT, {'message': '已有日志下载正在进行'})
+      return
+    try:
+      flush_recording()
+      files = select_navigation_logs(start_ms, end_ms)
+      if not files:
+        self._json(HTTPStatus.NOT_FOUND, {'message': '所选时间没有导航日志，请刷新最近记录'})
+        return
+      self.send_response(HTTPStatus.OK)
+      self.send_header('Content-Type', 'application/zip')
+      self.send_header('Content-Disposition', f'attachment; filename="navigation-logs-{start_ms}-{end_ms}.zip"')
+      self.send_header('Cache-Control', 'no-store')
+      self.send_header('X-Content-Type-Options', 'nosniff')
+      self.send_header('Connection', 'close')
+      self.end_headers()
+      self.close_connection = True
+      stream_navigation_logs(files, self.wfile, start_ms=start_ms, end_ms=end_ms)
+      self.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+      pass
+    finally:
+      _LOG_DOWNLOAD_LOCK.release()
+
   def do_GET(self) -> None:
     request = urlparse(self.path)
     path = request.path
@@ -505,6 +536,28 @@ class DeviceConsoleHandler(BaseHTTPRequestHandler):
       self._send(HTTPStatus.FORBIDDEN, "text/plain; charset=utf-8", "仅允许本地网络访问".encode())
       return
     if path.startswith("/api/") and not self._authorize_api():
+      return
+    if path == '/api/navigation/logs/status':
+      self._json(HTTPStatus.OK, {**navigation_log_status(), **console_status()})
+      return
+    if path == '/api/navigation/logs/preview':
+      try:
+        files = select_navigation_logs(*self._range_from_query(query))
+        self._json(HTTPStatus.OK, {'file_count': len(files), 'total_bytes': sum(f.size for f in files),
+                                  'navigation_only': True})
+      except ValueError as error:
+        self._json(HTTPStatus.BAD_REQUEST, {'message': str(error)})
+      return
+    if path == '/api/navigation/logs/download':
+      try:
+        require_offroad()
+        start, end = self._range_from_query(query)
+        select_navigation_logs(start, end)
+        self._navigation_download(start, end)
+      except PermissionError as error:
+        self._json(HTTPStatus.FORBIDDEN, {'message': str(error)})
+      except ValueError as error:
+        self._json(HTTPStatus.BAD_REQUEST, {'message': str(error)})
       return
     if path == "/api/hotspot":
       self._json(HTTPStatus.OK, hotspot_status())
@@ -579,6 +632,14 @@ class DeviceConsoleHandler(BaseHTTPRequestHandler):
 
   def do_POST(self) -> None:
     if not self._authorize_api():
+      return
+    if self.path == '/api/navigation/logs/flush':
+      try:
+        require_offroad()
+        flushed = flush_recording()
+        self._json(HTTPStatus.OK, {**navigation_log_status(), **console_status(), 'flushed': flushed})
+      except PermissionError as error:
+        self._json(HTTPStatus.FORBIDDEN, {'message': str(error)})
       return
     if self.path == "/api/tesla/ambient":
       try:

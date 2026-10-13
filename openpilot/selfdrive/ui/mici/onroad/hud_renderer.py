@@ -11,6 +11,7 @@ from openpilot.system.ui.lib.text_measure import measure_text_cached
 from openpilot.system.ui.widgets import Widget
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.cereal import log
+from openpilot.sunnypilot.lane_topology.types import LaneMarkingType
 
 EventName = log.OnroadEvent.EventName
 
@@ -197,7 +198,105 @@ class HudRenderer(Widget):
 
     draw_egpu_status_panel(rect, self._font_medium, compact=True)
 
+    self._draw_lane_topology(rect)
+    self._draw_nav_assist(rect)
+
     self._draw_steering_wheel(rect)
+
+  def _draw_lane_topology(self, rect: rl.Rectangle) -> None:
+    if ui_state.nav_assist_track_mode and ui_state.sm.seen["laneTopologyStateSP"]:
+      topology_sp = ui_state.sm["laneTopologyStateSP"]
+      service_healthy = ui_state.sm.alive["laneTopologyStateSP"] and ui_state.sm.valid["laneTopologyStateSP"]
+      if not service_healthy:
+        text = "LANE OBS UNAVAILABLE"
+      else:
+        type_text_sp = {"solid": "SOLID", "dashed": "DASHED"}
+        left_text = type_text_sp.get(str(topology_sp.leftMarking))
+        right_text = type_text_sp.get(str(topology_sp.rightMarking))
+        if not topology_sp.valid or topology_sp.stale or topology_sp.ambiguous or left_text is None or right_text is None:
+          return
+        lane_number = topology_sp.egoLaneIndexFromLeft + 1
+        validity = "CROSSING DATA VALID" if topology_sp.validForControl else "OBSERVATION ONLY"
+        text = f"L:{left_text}   LANE {lane_number}/{topology_sp.visibleLaneCount}   R:{right_text}   {validity}"
+    else:
+      topology = ui_state.lane_topology
+      if topology is None or topology.stale or topology.ego_lane_index_from_left < 0 or topology.visible_lane_count <= 0:
+        return
+      marking_types = ui_state.lane_topology_bridge.ego_marking_types()
+      if marking_types is None:
+        return
+      left_type, right_type = marking_types
+      type_text = {
+        LaneMarkingType.solid: "SOLID",
+        LaneMarkingType.dashed: "DASHED",
+      }
+      if left_type not in type_text or right_type not in type_text:
+        return
+      lane_number = topology.ego_lane_index_from_left + 1
+      text = f"L:{type_text[left_type]}   LANE {lane_number}/{topology.visible_lane_count}   " + \
+             f"R:{type_text[right_type]}   LINES {topology.boundary_count_visible}"
+    font_size = 28
+    size = measure_text_cached(self._font_semi_bold, text, font_size)
+    padding_x, padding_y = 16, 8
+    box = rl.Rectangle(
+      rect.x + (rect.width - size.x) / 2 - padding_x,
+      rect.y + rect.height - size.y - 18 - padding_y * 2,
+      size.x + padding_x * 2,
+      size.y + padding_y * 2,
+    )
+    rl.draw_rectangle_rounded(box, 0.35, 8, rl.Color(0, 0, 0, 145))
+    rl.draw_text_ex(self._font_semi_bold, text, rl.Vector2(box.x + padding_x, box.y + padding_y),
+                    font_size, 0, rl.Color(255, 255, 255, 225))
+
+  def _draw_nav_assist(self, rect: rl.Rectangle) -> None:
+    sm = ui_state.sm
+    if not ui_state.nav_assist_track_mode or not sm.seen["navAssistStateSP"]:
+      return
+    nav = sm["navAssistStateSP"]
+    service_healthy = sm.alive["navAssistStateSP"] and sm.valid["navAssistStateSP"]
+    maneuver_text = {
+      "slightLeft": "左前", "slightRight": "右前", "turnLeft": "左转", "turnRight": "右转",
+      "sharpLeft": "急左", "sharpRight": "急右", "uTurnLeft": "左掉头", "uTurnRight": "右掉头",
+      "keepLeft": "靠左", "keepRight": "靠右", "mergeLeft": "左并线", "mergeRight": "右并线",
+      "exitLeft": "左出口", "exitRight": "右出口", "rampLeft": "左匝道", "rampRight": "右匝道",
+      "roundabout": "环岛", "straight": "直行", "destination": "到达",
+    }.get(str(nav.maneuver), "等待导航")
+    recommended = [str(lane.index + 1) for lane in nav.lanes if lane.recommended]
+    lane_text = f" · AMap推荐 {','.join(recommended)}" if recommended else ""
+    lane_intent_text = ""
+    if sm.seen["navLaneIntentSP"] and sm.alive["navLaneIntentSP"] and sm.valid["navLaneIntentSP"]:
+      lane_intent = sm["navLaneIntentSP"]
+      if lane_intent.signalRequested:
+        direction = "左" if str(lane_intent.direction) == "left" else "右"
+        if lane_intent.targetLaneIndex < 0:
+          lane_intent_text = f" · {direction}转灯已提前开启"
+        elif lane_intent.forkNow:
+          lane_intent_text = f" · {direction}分叉强制 · 未知/实线放行"
+        else:
+          phase = "条件就绪" if lane_intent.spLaneChangeReady else "等待虚线/物理灯/盲区"
+          lane_intent_text = f" · {direction}变道{phase}"
+    if service_healthy and nav.valid:
+      longitudinal_sp_healthy = sm.alive["longitudinalPlanSP"] and sm.valid["longitudinalPlanSP"]
+      decel_active = longitudinal_sp_healthy and str(sm["longitudinalPlanSP"].longitudinalPlanSource) == "navAssist"
+      status = "导航减速约束生效" if decel_active else "导航数据有效"
+      text = f"封闭场地{status} · {maneuver_text} {max(0, int(nav.maneuverDistanceM))}m{lane_text}{lane_intent_text}"
+      color = rl.Color(255, 214, 64, 235)
+    else:
+      reason = str(nav.rejectReason) if service_healthy else "serviceOffline"
+      text = f"封闭场地导航不可用 · {reason}"
+      color = rl.Color(255, 96, 96, 235)
+    font_size = 28
+    size = measure_text_cached(self._font_semi_bold, text, font_size)
+    padding_x, padding_y = 16, 8
+    box = rl.Rectangle(
+      rect.x + (rect.width - size.x) / 2 - padding_x,
+      rect.y + 26,
+      size.x + padding_x * 2,
+      size.y + padding_y * 2,
+    )
+    rl.draw_rectangle_rounded(box, 0.35, 8, rl.Color(0, 0, 0, 165))
+    rl.draw_text_ex(self._font_semi_bold, text, rl.Vector2(box.x + padding_x, box.y + padding_y),
+                    font_size, 0, color)
 
   def _draw_model_source(self, rect: rl.Rectangle) -> None:
     if ui_state.sm.recv_frame['selfdriveState'] < ui_state.started_frame:

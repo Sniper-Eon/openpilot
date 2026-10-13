@@ -17,6 +17,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.turn_signal import TurnSignalContr
 from openpilot.selfdrive.ui.sunnypilot.onroad.traffic_control import TrafficControlRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.circular_alerts import CircularAlertsRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.speed_renderer import SpeedRenderer
+from openpilot.selfdrive.ui.sunnypilot.onroad.lane_navigation_overlay import LaneNavigationOverlay
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.onroad.hud_renderer import HudRenderer, UI_CONFIG, FONT_SIZES, COLORS, CRUISE_DISABLED_CHAR
 from openpilot.system.ui.lib.application import gui_app
@@ -38,6 +39,7 @@ class HudRendererSP(HudRenderer):
     self.circular_alerts_renderer = CircularAlertsRenderer()
     self.speed_renderer = SpeedRenderer()
     self.traffic_control_renderer = TrafficControlRenderer()
+    self.lane_navigation_overlay = LaneNavigationOverlay()
     self._torque_bar = TorqueBar(scale=3.0, always=True)
 
     self.pcm_cruise_speed: bool = True
@@ -133,6 +135,8 @@ class HudRendererSP(HudRenderer):
 
   def _render(self, rect: rl.Rectangle) -> None:
     super()._render(rect)
+
+    self.lane_navigation_overlay.render(rect)
 
     if ui_state.torque_bar:
       torque_rect = rect

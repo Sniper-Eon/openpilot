@@ -11,6 +11,7 @@ from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
+from openpilot.sunnypilot.lane_topology.ui_bridge import visionbuf_luma
 
 if gui_app.sunnypilot_ui():
   from openpilot.selfdrive.ui.sunnypilot.onroad.alert_renderer import AlertRendererSP as AlertRenderer
@@ -83,6 +84,7 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
 
     # Render the base camera view
     super()._render(self._content_rect)
+    self._update_lane_marking_evidence()
 
     # Draw all UI overlays
     self.model_renderer.render(self._content_rect)
@@ -98,6 +100,18 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
 
     # Draw colored border based on driving state
     self._draw_border(rect)
+
+  def _update_lane_marking_evidence(self) -> None:
+    if ui_state.nav_assist_track_mode:
+      return
+    if self.frame is None or self.device_camera is None or not ui_state.lane_topology_bridge.needs_image(self.frame.frame_id):
+      return
+    is_wide_camera = self.stream_type == WIDE_CAM
+    camera = self.device_camera.wide_road if is_wide_camera else self.device_camera.narrow_road
+    calibration = self.view_from_wide_calib if is_wide_camera else self.view_from_calib
+    ui_state.lane_topology_bridge.update_image(
+      self.frame.frame_id, visionbuf_luma(self.frame), camera.intrinsics @ calibration,
+    )
 
   def _handle_mouse_press(self, _):
     if not self._hud_renderer.user_interacting() and self._click_callback is not None:

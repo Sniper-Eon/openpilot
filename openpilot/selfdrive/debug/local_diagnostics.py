@@ -18,6 +18,7 @@ import zstandard as zstd
 from openpilot.cereal import messaging
 from openpilot.cereal.services import SERVICE_LIST
 from openpilot.common.hardware.hw import Paths
+from openpilot.sunnypilot.navassist.diagnostics import NAVIGATION_ONLY_SERVICES
 
 
 # The service registry is the single source of truth. Standard hardware keeps
@@ -25,7 +26,7 @@ from openpilot.common.hardware.hw import Paths
 LOCAL_DIAGNOSTIC_SERVICES: dict[str, int] = {
   name: service.local_diagnostic_decimation
   for name, service in SERVICE_LIST.items()
-  if service.local_diagnostic_decimation is not None
+  if service.local_diagnostic_decimation is not None and name not in NAVIGATION_ONLY_SERVICES
 }
 
 DEFAULT_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024

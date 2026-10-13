@@ -93,6 +93,9 @@ def jetlink(installed=True, **fields):
 class FakeSM:
   def __init__(self, board, big=False, alive=False, recv=0, state='none'):
     self.board = board
+    # The navigation observer is idle in accelerator-only scenarios.
+    self.seen = {"laneTopologyStateSP": False}
+    self.updated = {"modelV2": False}
     self.recv_frame = {"modelV2": recv}
     self.alive = {"modelV2": alive}
     self.big = big

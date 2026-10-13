@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+import time
+import pytest
 
 from openpilot.sunnypilot.selfdrive.car.tesla.card_adapter import CONTEXT_STALE_S, LIGHTING_MESSAGE, TeslaCardAdapter, speed_limit_context
 
@@ -34,11 +36,15 @@ class FakeSubMaster:
         actuators=SimpleNamespace(accel=0.5),
       ),
       "selfdriveStateSP": SimpleNamespace(mads=SimpleNamespace(active=False)),
+      "navLaneIntentSP": SimpleNamespace(
+        valid=False, signalRequested=False, direction="none", sessionId="", routeRevision=0, requestId=0,
+      ),
       "modelV2": SimpleNamespace(meta=SimpleNamespace(laneChangeState=SimpleNamespace(raw=0), laneChangeDirection=SimpleNamespace(raw=0))),
     }
     self.recv_time = dict.fromkeys(self.data, now)
     self.seen = dict.fromkeys(self.data, True)
     self.valid = dict.fromkeys(self.data, True)
+    self.alive = dict.fromkeys(self.data, True)
     self.updated = dict.fromkeys(self.data, True)
 
   def __getitem__(self, name):
@@ -157,3 +163,175 @@ def test_non_tesla_adapter_is_inert():
   assert not state.templates
   assert not state.longitudinal
   assert not state.speed_limit
+
+
+def test_navigation_lane_intent_requests_and_cancels_bounded_tesla_signal_session():
+  now = time.monotonic()
+  sm = FakeSubMaster(now=now)
+  sm.data["navLaneIntentSP"] = SimpleNamespace(
+    valid=True, signalRequested=True, direction="left", sessionId="session-a", routeRevision=7, requestId=3,
+  )
+  adapter = TeslaCardAdapter("tesla", SimpleNamespace(CS=FakeState()), sm)
+
+  class FakeValidation:
+    def __init__(self):
+      self.requests = []
+      self.cancels = []
+
+    def submit_request(self, test_id, direction, now_nanos, session_timeout_ns=None, **kwargs):
+      self.requests.append((test_id, direction, now_nanos, session_timeout_ns, kwargs))
+      return True
+
+    def request_cancel(self, test_id, now_nanos):
+      self.cancels.append((test_id, now_nanos))
+      return True
+
+  validation = FakeValidation()
+  adapter.validation = validation
+  adapter._update_nav_turn_signal(100)
+  adapter._update_nav_turn_signal(101)
+  assert validation.requests == [(
+    "nav-fa57a52d-7-3-left", "left", 100, 60_000_000_000, {"hold_until_cancel": True},
+  )]
+
+  sm.data["navLaneIntentSP"].signalRequested = False
+  adapter._update_nav_turn_signal(102)
+  assert validation.cancels == [("nav-fa57a52d-7-3-left", 102)]
+
+
+def test_temporarily_busy_signal_controller_retries_with_bounded_backoff():
+  now = time.monotonic()
+  sm = FakeSubMaster(now=now)
+  sm.data["navLaneIntentSP"] = SimpleNamespace(
+    valid=True, signalRequested=True, direction="right", sessionId="session-b", routeRevision=2, requestId=4,
+  )
+  adapter = TeslaCardAdapter("tesla", SimpleNamespace(CS=FakeState()), sm)
+
+  class BusyOnce:
+    configured = True
+
+    def __init__(self):
+      self.calls = []
+
+    def submit_request(self, *args, **kwargs):
+      self.calls.append((args, kwargs))
+      return len(self.calls) > 1
+
+  validation = BusyOnce()
+  adapter.validation = validation
+  adapter._update_nav_turn_signal(100)
+  adapter._update_nav_turn_signal(200)
+  adapter._update_nav_turn_signal(500_000_100)
+  assert len(validation.calls) == 2
+
+
+def test_navigation_signal_retries_after_realtime_controller_cancels_inactive_lateral_session():
+  now = time.monotonic()
+  sm = FakeSubMaster(now=now)
+  sm.data["navLaneIntentSP"] = SimpleNamespace(
+    valid=True, signalRequested=True, direction="right", sessionId="session-retry", routeRevision=3, requestId=9,
+  )
+  adapter = TeslaCardAdapter("tesla", SimpleNamespace(CS=FakeState()), sm)
+  adapter.validation.configured = True
+
+  adapter._update_nav_turn_signal(12_000_000_000)
+  assert adapter.validation.status() is not None
+  adapter.validation.update_lane_change_context(
+    12_000_000_001, valid=True, state=0, direction=0, lateral_active=False, brake_pressed=False,
+  )
+  assert adapter.validation.status() is None
+
+  adapter._update_nav_turn_signal(13_000_000_000)
+  assert adapter.validation.status() is not None
+
+
+def test_navigation_signal_waits_for_lateral_control_before_opening_session():
+  now = time.monotonic()
+  sm = FakeSubMaster(now=now)
+  sm.data["navLaneIntentSP"] = SimpleNamespace(
+    valid=True, signalRequested=True, direction="left", sessionId="session-wait", routeRevision=2, requestId=5,
+  )
+  adapter = TeslaCardAdapter("tesla", SimpleNamespace(CS=FakeState()), sm)
+  adapter.validation.configured = True
+
+  adapter._update_nav_turn_signal(12_000_000_000, lateral_active=False)
+  assert adapter.validation.status() is None
+  adapter._update_nav_turn_signal(12_500_000_000, lateral_active=True)
+  assert adapter.validation.status() is not None
+
+
+def test_pre_turn_lamp_transitions_to_same_direction_lane_change_without_blinking_off():
+  now = time.monotonic()
+  sm = FakeSubMaster(now=now)
+  sm.data["navLaneIntentSP"] = SimpleNamespace(
+    valid=True, signalRequested=True, direction="left", sessionId="session-a", routeRevision=7, requestId=11,
+  )
+  adapter = TeslaCardAdapter("tesla", SimpleNamespace(CS=FakeState()), sm)
+
+  class Validation:
+    configured = True
+
+    def __init__(self):
+      self.requests = []
+      self.cancels = []
+
+    def submit_request(self, test_id, direction, now_nanos, session_timeout_ns=None, **kwargs):
+      self.requests.append((test_id, direction, now_nanos, session_timeout_ns, kwargs))
+      return True
+
+    def request_cancel(self, test_id, now_nanos):
+      self.cancels.append((test_id, now_nanos))
+      return True
+
+  validation = Validation()
+  adapter.validation = validation
+  adapter._update_nav_turn_signal(100)
+
+  # The lane coordinator takes ownership after the lamp is already on. A new
+  # request id in the same session/revision/direction must reuse that session.
+  sm.data["navLaneIntentSP"].requestId = 1
+  adapter._update_nav_turn_signal(101)
+
+  assert len(validation.requests) == 1
+  assert not validation.cancels
+
+  sm.data["navLaneIntentSP"].signalRequested = False
+  adapter._update_nav_turn_signal(102)
+  assert validation.cancels == [("nav-fa57a52d-7-11-left", 102)]
+
+
+def test_navigation_signal_direction_change_cancels_old_lamp_before_requesting_new_one():
+  now = time.monotonic()
+  sm = FakeSubMaster(now=now)
+  sm.data["navLaneIntentSP"] = SimpleNamespace(
+    valid=True, signalRequested=True, direction="left", sessionId="session-a", routeRevision=7, requestId=11,
+  )
+  adapter = TeslaCardAdapter("tesla", SimpleNamespace(CS=FakeState()), sm)
+
+  class Validation:
+    configured = True
+
+    def __init__(self):
+      self.requests = []
+      self.cancels = []
+
+    def submit_request(self, test_id, direction, now_nanos, session_timeout_ns=None, **kwargs):
+      self.requests.append((test_id, direction, now_nanos, session_timeout_ns, kwargs))
+      return True
+
+    def request_cancel(self, test_id, now_nanos):
+      self.cancels.append((test_id, now_nanos))
+      return True
+
+  validation = Validation()
+  adapter.validation = validation
+  adapter._update_nav_turn_signal(100)
+
+  sm.data["navLaneIntentSP"].direction = "right"
+  sm.data["navLaneIntentSP"].requestId = 12
+  adapter._update_nav_turn_signal(101)
+  assert validation.cancels == [("nav-fa57a52d-7-11-left", 101)]
+  assert len(validation.requests) == 1
+
+  adapter._update_nav_turn_signal(101 + 500_000_000)
+  assert validation.requests[-1][1] == "right"

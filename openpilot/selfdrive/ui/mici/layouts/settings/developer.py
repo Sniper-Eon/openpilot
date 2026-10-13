@@ -9,6 +9,26 @@ from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
 
 
+def nav_assist_paired() -> bool:
+  pairing = ui_state.params.get("NavAssistPairedApp")
+  if not isinstance(pairing, dict):
+    return False
+  if isinstance(pairing.get("keyId"), str):
+    return True
+  apps = pairing.get("apps")
+  return isinstance(apps, list) and any(isinstance(app, dict) and isinstance(app.get("keyId"), str) for app in apps)
+
+
+def nav_assist_turn_signal_ready() -> bool:
+  return ui_state.params.get_bool("TeslaTurnSignalValidation")
+
+
+def nav_assist_status() -> str:
+  pairing = "paired" if nav_assist_paired() else "waiting for TesNav"
+  signal = "signal ready" if nav_assist_turn_signal_ready() else "signal disabled; restart required"
+  return f"{pairing} / {signal}"
+
+
 class AlphaLongConfirmPage(NavScroller):
   def __init__(self, on_confirm: Callable[[], None]):
     super().__init__()
@@ -79,6 +99,15 @@ class DeveloperLayoutMici(NavScroller):
     self._lat_maneuver_toggle = BigToggle("lateral maneuver mode",
                                           initial_state=ui_state.params.get_bool("LateralManeuverMode"),
                                           toggle_callback=self._on_lat_maneuver_mode)
+    self._nav_assist_toggle = BigToggle("navigation assist auto pairing",
+                                        value=nav_assist_status(),
+                                        initial_state=nav_assist_paired(),
+                                        toggle_callback=lambda _state: None)
+    self._nav_assist_toggle.set_enabled(False)
+    self._nav_assist_reset = BigButton("reset TesNav pairing", "offroad only")
+    self._nav_assist_reset.set_click_callback(
+      lambda: ui_state.params.put_bool("NavAssistPairingReset", True, block=True),
+    )
     self._alpha_long_toggle = BigToggle("alpha longitudinal",
                                         initial_state=ui_state.params.get_bool("AlphaLongitudinalEnabled"),
                                         toggle_callback=self._on_alpha_long_enabled)
@@ -93,6 +122,8 @@ class DeveloperLayoutMici(NavScroller):
       self._joystick_toggle,
       self._long_maneuver_toggle,
       self._lat_maneuver_toggle,
+      self._nav_assist_toggle,
+      self._nav_assist_reset,
       self._alpha_long_toggle,
       self._debug_mode_toggle,
     ])
@@ -108,7 +139,11 @@ class DeveloperLayoutMici(NavScroller):
       ("ShowDebugInfo", self._debug_mode_toggle),
     )
     onroad_blocked_toggles = (self._adb_toggle, self._joystick_toggle)
-    release_blocked_toggles = (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle)
+    release_blocked_toggles = (
+      self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle,
+      self._nav_assist_toggle, self._alpha_long_toggle,
+      self._nav_assist_reset,
+    )
     engaged_blocked_toggles = (self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle)
 
     # Hide non-release toggles on release builds
@@ -142,6 +177,10 @@ class DeveloperLayoutMici(NavScroller):
 
   def _update_toggles(self):
     ui_state.update_params()
+    self._nav_assist_toggle.set_value(
+      nav_assist_status(),
+    )
+    self._nav_assist_toggle.set_checked(nav_assist_paired())
 
     # CP gating
     if ui_state.CP is not None:
@@ -155,9 +194,13 @@ class DeveloperLayoutMici(NavScroller):
       long_man_enabled = ui_state.has_longitudinal_control and ui_state.is_offroad()
       self._long_maneuver_toggle.set_enabled(long_man_enabled)
       self._lat_maneuver_toggle.set_enabled(ui_state.is_offroad())
+      self._nav_assist_toggle.set_enabled(False)
+      self._nav_assist_reset.set_enabled(ui_state.is_offroad())
     else:
       self._long_maneuver_toggle.set_enabled(False)
       self._lat_maneuver_toggle.set_enabled(False)
+      self._nav_assist_toggle.set_enabled(False)
+      self._nav_assist_reset.set_enabled(False)
       self._alpha_long_toggle.set_visible(False)
 
     # Refresh toggles from params to mirror external changes

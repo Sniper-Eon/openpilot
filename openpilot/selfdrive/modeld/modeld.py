@@ -41,6 +41,11 @@ from openpilot.sunnypilot import jetlink_adapter
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
+from openpilot.sunnypilot.selfdrive.controls.lib.lane_change_blocker import (
+  LaneChangeBoundaryBlocker,
+  lane_topology_nav_crossing_allowed,
+  nav_lane_crossing_policy,
+)
 from openpilot.sunnypilot.selfdrive.controls.lib.relc import RoadEdgeLaneChangeController
 
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
@@ -301,7 +306,7 @@ def main(demo=False):
   # messaging
   pub_socks = ["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"] + (["chestnutState"] if CHESTNUT else [])
   pm = PubMaster(pub_socks)
-  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay"])
+  sm = SubMaster(["deviceState", "carState", "narrowRoadCameraState", "extrinsicsCalibration", "driverMonitoringState", "carControl", "lateralDelay", "navLaneIntentSP", "laneTopologyStateSP"])
 
   publish_state = PublishState()
   params = Params()
@@ -333,6 +338,7 @@ def main(demo=False):
 
   DH = DesireHelper()
   RELC = RoadEdgeLaneChangeController()
+  LINE_BLOCKER = LaneChangeBoundaryBlocker()
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -459,7 +465,38 @@ def main(demo=False):
       mdv2sp_send = messaging.new_message('modelDataV2SP')
       mdv2sp_send.modelDataV2SP.acceleratorState = getattr(model, 'big_model_state', 'none')
       left_edge, right_edge = RELC.update_and_fill(modelv2_send.modelV2, mdv2sp_send.modelDataV2SP, v_ego)
-      DH.update(sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge)
+      nav_lane_intent = sm['navLaneIntentSP'] if (
+        sm.seen['navLaneIntentSP'] and sm.alive['navLaneIntentSP'] and sm.valid['navLaneIntentSP']
+      ) else None
+      lane_topology_healthy = bool(
+        nav_lane_intent is not None and nav_lane_intent.valid and nav_lane_intent.signalRequested and
+        sm.seen['laneTopologyStateSP'] and sm.alive['laneTopologyStateSP'] and sm.valid['laneTopologyStateSP']
+      )
+      left_unknown, left_ignore_solid = nav_lane_crossing_policy(nav_lane_intent, "left")
+      right_unknown, right_ignore_solid = nav_lane_crossing_policy(nav_lane_intent, "right")
+      if not (nav_lane_intent is not None and nav_lane_intent.valid and nav_lane_intent.signalRequested):
+        LINE_BLOCKER.reset()
+      left_line_blocked, right_line_blocked = LINE_BLOCKER.update(
+        sm['laneTopologyStateSP'], healthy=lane_topology_healthy,
+        ignore_left_solid=left_ignore_solid,
+        ignore_right_solid=right_ignore_solid,
+      )
+      topology = sm['laneTopologyStateSP']
+      left_crossing_allowed = lane_topology_nav_crossing_allowed(
+        topology, side="left", healthy=lane_topology_healthy,
+        allow_unknown=left_unknown, ignore_solid=left_ignore_solid,
+      )
+      right_crossing_allowed = lane_topology_nav_crossing_allowed(
+        topology, side="right", healthy=lane_topology_healthy,
+        allow_unknown=right_unknown, ignore_solid=right_ignore_solid,
+      )
+      DH.update(
+        sm['carState'], sm['carControl'].latActive, lane_change_prob, left_edge, right_edge,
+        nav_lane_intent=nav_lane_intent,
+        left_line_blocked=left_line_blocked, right_line_blocked=right_line_blocked,
+        left_crossing_allowed=left_crossing_allowed,
+        right_crossing_allowed=right_crossing_allowed,
+      )
       modelv2_send.modelV2.meta.laneChangeState = DH.lane_change_state
       modelv2_send.modelV2.meta.laneChangeDirection = DH.lane_change_direction
       mdv2sp_send.valid = modelv2_send.valid

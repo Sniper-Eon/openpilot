@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tesnav.local/protocol/navassist-v3.schema.json",
+  "title": "NavAssist v3 navigation snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "messageType",
+    "sessionId",
+    "sequence",
+    "routeRevision",
+    "maneuverEventId",
+    "sourcePlatform",
+    "sourceWallTimeMs",
+    "validForMs",
+    "navigationMode",
+    "routeActive",
+    "gpsWeak",
+    "coordinateSystem"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "messageType": { "const": "navigation_snapshot" },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "sequence": { "type": "integer", "minimum": 1, "maximum": 9223372036854775807 },
+    "routeRevision": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+    "maneuverEventId": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 },
+    "sourcePlatform": { "enum": ["android", "ios", "track"] },
+    "sourceWallTimeMs": { "type": "integer", "minimum": 0 },
+    "validForMs": { "type": "integer", "minimum": 100, "maximum": 2000 },
+    "navigationMode": {
+      "enum": ["idle", "route_planned", "realtime", "simulation", "arrived", "recalculating"]
+    },
+    "routeActive": { "type": "boolean" },
+    "routeMatched": { "type": "boolean" },
+    "gpsWeak": { "type": "boolean" },
+    "coordinateSystem": { "enum": ["gcj02", "wgs84", "unknown"] },
+    "location": { "$ref": "#/$defs/location" },
+    "guidance": { "$ref": "#/$defs/guidance" },
+    "lanes": { "$ref": "#/$defs/lanes" }
+  },
+  "$defs": {
+    "maneuver": {
+      "enum": [
+        "none",
+        "straight",
+        "slight_left",
+        "slight_right",
+        "turn_left",
+        "turn_right",
+        "sharp_left",
+        "sharp_right",
+        "u_turn_left",
+        "u_turn_right",
+        "keep_left",
+        "keep_right",
+        "merge_left",
+        "merge_right",
+        "exit_left",
+        "exit_right",
+        "ramp_left",
+        "ramp_right",
+        "roundabout",
+        "destination",
+        "unknown"
+      ]
+    },
+    "laneAction": {
+      "enum": [
+        "STRAIGHT",
+        "LEFT",
+        "RIGHT",
+        "U_TURN",
+        "LEFT_U_TURN",
+        "RIGHT_U_TURN",
+        "BUS",
+        "VARIABLE",
+        "DEDICATED",
+        "TIDAL",
+        "UNKNOWN"
+      ]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latitude", "longitude", "accuracyM", "bearingDeg", "speedKph", "observedAtMs"],
+      "properties": {
+        "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+        "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+        "accuracyM": { "type": "number", "minimum": 0, "maximum": 200 },
+        "bearingDeg": { "type": "number", "minimum": 0, "maximum": 360 },
+        "speedKph": { "type": "number", "minimum": 0, "maximum": 300 },
+        "observedAtMs": { "type": "integer", "minimum": 0 },
+        "currentStepIndex": { "type": "integer", "minimum": 0 },
+        "currentLinkIndex": { "type": "integer", "minimum": 0 },
+        "currentPointIndex": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedAtMs", "maneuver"],
+      "properties": {
+        "observedAtMs": { "type": "integer", "minimum": 0 },
+        "maneuver": { "$ref": "#/$defs/maneuver" },
+        "maneuverDistanceM": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "nextManeuver": { "$ref": "#/$defs/maneuver" },
+        "nextManeuverDistanceM": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "currentRoad": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "nextRoad": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "roadClass": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "roadType": {
+          "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 53, 56, 58]
+        },
+        "advisorySpeedMps": { "type": "number", "exclusiveMinimum": 0, "maximum": 60 }
+      }
+    },
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedAtMs", "items"],
+      "properties": {
+        "observedAtMs": { "type": "integer", "minimum": 0 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/lane" },
+          "maxItems": 16
+        }
+      }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "allowedActions", "recommended", "recommendedActions"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "allowedActions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/laneAction" },
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "recommended": { "type": "boolean" },
+        "recommendedActions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/laneAction" },
+          "uniqueItems": true,
+          "maxItems": 16
+        }
+      }
+    }
+  }
+}

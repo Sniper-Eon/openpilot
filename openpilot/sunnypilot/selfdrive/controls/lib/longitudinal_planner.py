@@ -16,6 +16,8 @@ from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_assist 
 from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit.speed_limit_resolver import SpeedLimitResolver
 from openpilot.sunnypilot.selfdrive.selfdrived.events import EventsSP
 from openpilot.sunnypilot.models.helpers import get_active_bundle
+from openpilot.sunnypilot.navassist.speed_controller import NavigationSpeedController
+from openpilot.sunnypilot.selfdrive.controls.lib.longitudinal_backends.registry import BackendId
 
 DecState = custom.LongitudinalPlanSP.DynamicExperimentalControl.DynamicExperimentalControlState
 LongitudinalPlanSource = custom.LongitudinalPlanSP.LongitudinalPlanSource
@@ -29,6 +31,7 @@ class LongitudinalPlannerSP:
     self.scc = SmartCruiseControl()
     self.resolver = SpeedLimitResolver()
     self.sla = SpeedLimitAssist(CP, CP_SP)
+    self.nav = NavigationSpeedController(enabled=CP.brand == "tesla", require_sp_longitudinal_owner=CP.brand == "tesla")
     self.generation = int(model_bundle.generation) if (model_bundle := get_active_bundle()) else None
     self.source = LongitudinalPlanSource.cruise
     self.e2e_alerts_helper = E2EAlertsHelper()
@@ -62,11 +65,20 @@ class LongitudinalPlannerSP:
     self.sla.update(long_enabled, long_override, v_ego, a_ego, v_cruise_cluster, self.resolver.speed_limit,
                     self.resolver.speed_limit_final_last, has_speed_limit, self.resolver.distance, self.events_sp)
 
+    # Closed-course mobile navigation contributes only a lower speed ceiling.
+    # Disabled/unhealthy input is V_CRUISE_UNSET and is therefore transparent.
+    self.nav.update(sm, long_enabled=sm['carControl'].longActive, long_override=long_override,
+                    v_ego=v_ego, a_ego=a_ego, v_cruise=v_cruise,
+                    planner_verified=getattr(self, "active_backend_id", None) in (
+                      BackendId.OFFICIAL, BackendId.EXPERIMENTAL, BackendId.TN_NO_DEC,
+                    ))
+
     targets = {
       LongitudinalPlanSource.cruise: (v_cruise, a_ego),
       LongitudinalPlanSource.sccVision: (self.scc.vision.output_v_target, self.scc.vision.output_a_target),
       LongitudinalPlanSource.sccMap: (self.scc.map.output_v_target, self.scc.map.output_a_target),
       LongitudinalPlanSource.speedLimitAssist: (self.sla.output_v_target, self.sla.output_a_target),
+      LongitudinalPlanSource.navAssist: (self.nav.output_v_target, self.nav.output_a_target),
     }
 
     self.source = min(targets, key=lambda k: targets[k][0])
