@@ -33,9 +33,9 @@ if [ -z "$SP_PROFILE_VALUE" ]; then
 fi
 
 if [ "$SP_PROFILE_VALUE" = "c3xl" ]; then
-  # the C3XL ships the vendor's AGNOS build; naming the stock 19.7 here makes
-  # updated try to flash comma's image over it on every boot
-  [ -z "$AGNOS_VERSION" ] && export AGNOS_VERSION="19.7-c3xl-dev"
+  # Use the actual version of the system image in the C3XL manifest.
+  # The validated C3XL boot chain is selected by the manifest below.
+  [ -z "$AGNOS_VERSION" ] && export AGNOS_VERSION="19.7"
   [ -z "$AGNOS_MANIFEST_FILE" ] && export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-c3xl.json"
 else
   [ -z "$AGNOS_VERSION" ] && export AGNOS_VERSION="19.7"
