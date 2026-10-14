@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -17,6 +18,39 @@ def test_settings_persist_and_keep_unmodified_defaults(tmp_path):
   assert store.read() == NavAssistSettings()
   store.update({'turn_lane_lookahead_m': 300, 'turn_speed_kph': 20})
   assert SettingsStore(store.path).read() == replace(NavAssistSettings(), turn_lane_lookahead_m=300, turn_speed_kph=20)
+
+
+def test_previous_branch_settings_can_be_read_and_updated_without_losing_fields(tmp_path):
+  store = SettingsStore(tmp_path / 'settings.json')
+  previous = {'enabled': False, 'signal_lead_time_s': 10,
+              'efficiency_lane_change_enabled': True, 'overtake_mode': 2}
+  store.path.write_text(json.dumps(previous))
+  cache = SettingsCache(store)
+  assert cache.read() == replace(NavAssistSettings(), enabled=False, signal_lead_time_s=10)
+  assert cache.error is None
+  store.update({'turn_speed_kph': 22})
+  assert SettingsStore(store.path).read() == replace(
+    NavAssistSettings(), enabled=False, signal_lead_time_s=10, turn_speed_kph=22)
+  saved = json.loads(store.path.read_text())
+  assert all(saved[key] == value for key, value in previous.items())
+
+
+@pytest.mark.parametrize('values', [[], {'enabled': 1}, {'signal_lead_time_s': 100}])
+def test_invalid_supported_settings_remain_rejected_without_overwriting_file(tmp_path, values):
+  store = SettingsStore(tmp_path / 'settings.json')
+  original = json.dumps(values)
+  store.path.write_text(original)
+  with pytest.raises(ValueError):
+    store.update({'turn_speed_kph': 20})
+  assert store.path.read_text() == original
+
+
+def test_unknown_updates_are_rejected_even_with_previous_branch_fields(tmp_path):
+  store = SettingsStore(tmp_path / 'settings.json')
+  store.path.write_text(json.dumps({'overtake_mode': 2}))
+  with pytest.raises(ValueError):
+    store.update({'unexpected': True})
+  assert json.loads(store.path.read_text()) == {'overtake_mode': 2}
 
 
 @pytest.mark.parametrize('changes', [{'enabled': 1}, {'turn_speed_kph': 100}, {'signal_lead_time_s': 2},

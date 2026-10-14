@@ -86,17 +86,27 @@ class SettingsStore:
   def __init__(self, path: Path | None = None):
     self.path = path if path is not None else settings_path()
 
-  def read(self) -> NavAssistSettings:
+  def _read_values(self) -> dict:
     try:
       if self.path.stat().st_size > 8192:
         raise ValueError('导航设置文件过大')
-      return parse_settings(json.loads(self.path.read_text()))
+      values = json.loads(self.path.read_text())
+      if not isinstance(values, dict):
+        raise ValueError('导航设置必须为对象')
+      return values
     except FileNotFoundError:
-      return NavAssistSettings()
+      return {}
+
+  def read(self) -> NavAssistSettings:
+    # Other branches may share this file. Validate supported settings while
+    # leaving their additional fields available for a later branch switch.
+    return parse_settings({key: value for key, value in self._read_values().items() if key in SETTING_SPECS})
 
   def update(self, changes: dict) -> NavAssistSettings:
-    settings = parse_settings(asdict(self.read()) | changes)
-    atomic_json(self.path, asdict(settings))
+    values = self._read_values()
+    current = parse_settings({key: value for key, value in values.items() if key in SETTING_SPECS})
+    settings = parse_settings(asdict(current) | changes)
+    atomic_json(self.path, values | asdict(settings))
     return settings
 
 
