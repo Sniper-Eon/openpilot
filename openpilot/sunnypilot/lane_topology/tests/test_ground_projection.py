@@ -32,11 +32,11 @@ CAMERA_HEIGHT_M = 1.2
 def camera_matrix() -> np.ndarray:
   """The shipped convention: intrinsics @ view_from_calib over camera-centred (x, y, z).
 
-  ``x`` is forward, ``y`` left-positive and ``z`` up, so the road surface is the
-  plane ``z = -camera_height``.
+  The calibration frame is ``x`` forward, ``y`` right, ``z`` down, so the road
+  surface is the plane ``z = +camera_height``.
   """
   intrinsics = np.array(((FOCAL, 0.0, PRINCIPAL_X), (0.0, FOCAL, PRINCIPAL_Y), (0.0, 0.0, 1.0)))
-  view_from_calib = np.array(((0.0, 1.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0)))
+  view_from_calib = np.array(((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)))
   return intrinsics @ view_from_calib
 
 
@@ -45,8 +45,12 @@ def horizon_pixel() -> tuple[float, float]:
 
 
 def point_above_the_horizon() -> tuple[float, float]:
-  """A pixel of a point floating above the road, so the ray never meets the plane."""
-  projected = camera_matrix() @ np.array((10.0, 0.0, 2.0))
+  """A pixel of a point floating above the camera.
+
+  ``z`` is down in the calibration frame, so a negative ``z`` is above the camera
+  and the ray never meets the road plane at ``z = +camera_height``.
+  """
+  projected = camera_matrix() @ np.array((10.0, 0.0, -2.0))
   return float(projected[0] / projected[2]), float(projected[1] / projected[2])
 
 
@@ -63,12 +67,42 @@ def test_the_homography_matches_the_forward_projection_the_repo_already_uses():
 
   for x, y in ((5.0, -1.75), (10.0, 1.75), (40.0, -5.25)):
     # metric_marking.project_model_lane_metric_samples applies the matrix to (x, y, z).
-    expected = matrix @ np.array((x, y, -CAMERA_HEIGHT_M))
+    expected = matrix @ np.array((x, y, CAMERA_HEIGHT_M))
     actual = homography @ np.array((x, y, 1.0))
     assert np.allclose(actual, expected)
     # ... and divides by the depth to get an image pixel.
     assert actual[0] / actual[2] == pytest.approx(PRINCIPAL_X + FOCAL * y / x)
     assert actual[1] / actual[2] == pytest.approx(PRINCIPAL_Y + FOCAL * CAMERA_HEIGHT_M / x)
+
+
+def test_the_homography_reproduces_the_device_calibrated_ego_point():
+  """Anchored to the device, not to this module's own assumptions.
+
+  The 2026-10-15 road-test sample carries the real extrinsicsCalibration. The
+  device projects the ground point 10 m ahead with the same matrix and reports
+  it as the ego point, so the homography must land on exactly that pixel. A sign
+  error in the ground plane passes every self-consistent test and fails this one.
+  """
+  from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
+  from openpilot.common.transformations.orientation import rot_from_euler
+
+  rpy_calib = (-6.535845022881404e-05, -0.021342530846595764, 0.008498449809849262)
+  wide_from_device = (-2.1014362516780238e-07, 0.04605923965573311, -0.014795083552598953)
+  height = 1.2537217140197754
+  camera = DEVICE_CAMERAS[('unknown', 'ox03c10')].wide_road
+  matrix = (camera.intrinsics @ view_frame_from_device_frame
+            @ rot_from_euler(wide_from_device) @ rot_from_euler(rpy_calib))
+
+  pixels = vehicle_to_image(ground_homography(matrix, height), [(10.0, 0.0)])
+
+  assert len(pixels) == 1
+  assert pixels[0][0] == pytest.approx(0.4981 * camera.width, abs=0.5)
+  assert pixels[0][1] == pytest.approx(0.5471 * camera.height, abs=0.5)
+  # The wrong sign puts the road plane above the camera and lands ~142 px high.
+  flipped = matrix[:, :2].tolist()
+  wrong = np.column_stack((np.array(flipped), matrix[:, 2] * -height))
+  assert abs((wrong @ np.array((10.0, 0.0, 1.0)))[1] / (wrong @ np.array((10.0, 0.0, 1.0)))[2]
+             - 0.5471 * camera.height) > 100.0
 
 
 def test_vehicle_and_image_round_trip():
@@ -160,7 +194,8 @@ def native_camera_matrix(width: int = NATIVE_WIDTH, height: int = NATIVE_HEIGHT)
   """The synthetic camera at the native frame size the calibration is expressed in."""
   focal = FOCAL * width / CANVAS_WIDTH
   intrinsics = np.array(((focal, 0.0, width / 2), (0.0, focal, height / 2), (0.0, 0.0, 1.0)))
-  view_from_calib = np.array(((0.0, 1.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0)))
+  # x forward, y right, z down in the calibration frame.
+  view_from_calib = np.array(((0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)))
   return intrinsics @ view_from_calib
 
 

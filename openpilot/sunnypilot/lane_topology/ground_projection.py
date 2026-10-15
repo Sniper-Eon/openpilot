@@ -3,10 +3,15 @@
 The external observer returns boundary polylines in image coordinates, while the
 absolute-lane evidence gate needs vehicle metres (``x`` forward, ``y``
 left-positive). For a known camera matrix and camera height the road surface is a
-plane, so a 3x3 homography maps it exactly: the plane is ``z = -camera_height`` in
-the camera-centred convention that ``camera_from_calib = intrinsics @
-view_from_calib`` uses (see ``navassist/lane_topologyd.py`` and
-``metric_marking.project_model_lane_metric_samples``).
+plane, so a 3x3 homography maps it exactly.
+
+The calibration frame that ``camera_from_calib = intrinsics @ view_from_calib``
+acts on is ``x`` forward, ``y`` right, ``z`` **down**, so the road surface sits at
+``z = +camera_height``. Measured on the 2026-10-15 road-test sample, modelV2 lane
+line ``z`` has median +1.243 m against a calibrated height of 1.2537 m, and only
+``+height`` reproduces the device's own ``calibrated_ego_point`` for a point 10 m
+ahead; ``-height`` lands 142 px too high. Getting this sign wrong silently puts
+the road plane above the camera.
 
 Only the projection and the canvas geometry are provided here. This module does
 not measure or classify a single lane marking, and no camera matrix has been
@@ -33,10 +38,10 @@ MIN_DEPTH = 1e-6
 def ground_homography(camera_from_calib, camera_height_m: float) -> np.ndarray:
   """Return the 3x3 homography mapping ground ``(x, y, 1)`` to image pixels.
 
-  ``camera_from_calib`` is the 3x3 matrix that maps a camera-centred point
-  ``(x_forward, y_left, z_up)`` to homogeneous pixels, exactly as
+  ``camera_from_calib`` is the 3x3 matrix that maps a calibration-frame point
+  ``(x_forward, y_right, z_down)`` to homogeneous pixels, exactly as
   ``metric_marking.project_model_lane_metric_samples`` applies it. The ground
-  plane sits at ``z = -camera_height_m``.
+  plane sits at ``z = +camera_height_m``.
   """
   matrix = np.asarray(camera_from_calib, dtype=np.float64)
   if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
@@ -45,10 +50,10 @@ def ground_homography(camera_from_calib, camera_height_m: float) -> np.ndarray:
       not MIN_CAMERA_HEIGHT_M <= camera_height_m <= MAX_CAMERA_HEIGHT_M:
     raise ValueError(f'camera height must be a finite number within '
                      f'[{MIN_CAMERA_HEIGHT_M}, {MAX_CAMERA_HEIGHT_M}] metres')
-  # (u_num, v_num, depth) = M @ (x, y, -h) = M[:, :2] @ (x, y) + M[:, 2] * -h
+  # (u_num, v_num, depth) = M @ (x, y, +h) = M[:, :2] @ (x, y) + M[:, 2] * +h
   homography = np.empty((3, 3), dtype=np.float64)
   homography[:, :2] = matrix[:, :2]
-  homography[:, 2] = matrix[:, 2] * -float(camera_height_m)
+  homography[:, 2] = matrix[:, 2] * float(camera_height_m)
   if abs(float(np.linalg.det(homography))) < MIN_HOMOGRAPHY_DETERMINANT:
     raise ValueError('degenerate ground-plane mapping')
   return homography
