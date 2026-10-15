@@ -106,3 +106,49 @@ def unknown_position_record(*, nav_session_id: str | None = None, route_revision
     stable_samples=0,
     capture_mono_ns=time.monotonic_ns() if capture_mono_ns is None else capture_mono_ns,
   )
+
+
+def publish_decision(decision, *, nav_session_id: str | None, route_revision: int,
+                     path: Path = POSITION_PATH, now_ns: int | None = None) -> dict:
+  """Publish one absolute lane gate decision, returning the record actually written.
+
+  ``decision`` is duck-typed on ``valid``, ``lane_index``, ``lane_count``,
+  ``stable_samples`` and ``capture_mono_ns``, which is the shape of
+  ``lane_topology.absolute_lane.AbsoluteLaneDecision``. Keeping it duck-typed
+  means this writer never has to import the vision stack.
+
+  An unconfirmed decision must overwrite the file with an explicit unknown rather
+  than simply not writing. Leaving the previous confirmation in place would keep
+  the phone showing a lane number the evidence no longer supports until the
+  reader's own deadline happened to expire it.
+
+  A confirmation that is already older than the reader's lifetime is downgraded
+  to unknown instead of being published stale or raising into a live loop.
+  """
+  if not decision.valid:
+    record = build_position_record(
+      absolute_confirmed=False, nav_session_id=nav_session_id, route_revision=route_revision,
+      stable_samples=decision.stable_samples,
+      capture_mono_ns=decision.capture_mono_ns or _monotonic_ns(now_ns),
+    )
+    write_position_record(record, path=path, now_ns=now_ns)
+    return record
+
+  record = build_position_record(
+    lane_index=decision.lane_index, lane_count=decision.lane_count, absolute_confirmed=True,
+    nav_session_id=nav_session_id, route_revision=route_revision,
+    stable_samples=decision.stable_samples, capture_mono_ns=decision.capture_mono_ns,
+  )
+  try:
+    write_position_record(record, path=path, now_ns=now_ns)
+  except ValueError:
+    record = build_position_record(
+      absolute_confirmed=False, nav_session_id=nav_session_id, route_revision=route_revision,
+      stable_samples=decision.stable_samples, capture_mono_ns=_monotonic_ns(now_ns),
+    )
+    write_position_record(record, path=path, now_ns=now_ns)
+  return record
+
+
+def _monotonic_ns(now_ns: int | None) -> int:
+  return time.monotonic_ns() if now_ns is None else now_ns
