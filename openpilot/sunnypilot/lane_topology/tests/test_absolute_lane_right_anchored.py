@@ -3,8 +3,8 @@
 The shipped gate needs both carriageway edges. On real wide-camera frames the
 left one is never found, while the right one is what observers do trace. The
 anchor here is the outermost **lane marking**, never the road edge: measured on a
-real segment the road edge sits a median of 2.1 m beyond the ego lane's right
-line, which is a shoulder, and counting it as a lane shifts the answer by one.
+anchor is a claim the caller makes and the gate can only corroborate, so a lone
+lane marking with empty space beyond it is refused rather than trusted.
 """
 from dataclasses import replace
 from types import SimpleNamespace
@@ -19,7 +19,7 @@ from openpilot.sunnypilot.navassist.road_lane_position import publish_decision
 
 START_NS = 1_000_000_000
 STEP_NS = 100_000_000
-# Four lanes: five lane lines, the outermost at -7.0, and a 2.1 m shoulder beyond.
+# Four lanes: five lane lines, the outermost at -7.0, and a shoulder beyond.
 LANE_CENTRES = (5.25, 1.75, -1.75, -5.25)
 ANCHOR = 5
 SHOULDER_Y = -9.1
@@ -63,7 +63,7 @@ def test_each_lane_is_numbered_from_the_outermost_lane_marking():
 
 
 def test_the_road_edge_is_never_the_anchor():
-  # Handing the shoulder edge in as the anchor is the off-by-one trap.
+  # Handing the shoulder edge in as the anchor would count the shoulder as a lane.
   decision = settle(RightEdgeAnchoredGate(), carriageway(), ego_y_m=1.75, anchor=6)
 
   assert decision.valid is False and decision.reason == 'anchorIsNotALaneMarking'
@@ -182,3 +182,27 @@ def test_a_confirmed_decision_plugs_into_the_verified_producer(tmp_path):
   value = lane_position_feedback(SimpleNamespace(session_id='nav', route_revision=7), path=path,
                                  now_ns=START_NS + 2 * STEP_NS)
   assert value['valid'] is True and value['laneIndex'] == 2 and value['laneCount'] == 4
+
+
+def test_a_missing_divider_next_to_the_ego_is_not_absorbed_as_one_wide_lane():
+  """Three lanes, ego in the middle one, its own right line missed.
+
+  The span from the ego to the outermost line is then two lanes wide. Reading it
+  as the ego's lane alone puts the ego in the rightmost lane: 3 of 3 instead of
+  2 of 3, a confident wrong answer from evidence that never showed the divider.
+  """
+  boundaries = (boundary(1, 1.5), boundary(ANCHOR, -4.5, LaneMarkingType.solid),
+                boundary(6, -4.8, LaneMarkingType.roadEdge))
+
+  decision = settle(RightEdgeAnchoredGate(), boundaries, ego_y_m=0.0, lane_total=3)
+
+  assert decision.valid is False and decision.reason == 'implausibleLaneWidth'
+
+
+def test_a_lone_lane_marking_with_nothing_outboard_is_not_an_anchor():
+  """Two plain dashed lines and an empty right side corroborate nothing."""
+  boundaries = (boundary(1, 1.5), boundary(2, -1.5))
+
+  decision = settle(RightEdgeAnchoredGate(), boundaries, ego_y_m=0.0, lane_total=3, anchor=2)
+
+  assert decision.valid is False and decision.reason == 'rightBoundaryNotObserved'

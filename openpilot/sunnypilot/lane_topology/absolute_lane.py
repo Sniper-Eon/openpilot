@@ -16,6 +16,7 @@ into any live producer.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from openpilot.sunnypilot.lane_topology.geometry import (
   MAX_LANE_WIDTH_M,
@@ -30,6 +31,10 @@ from openpilot.sunnypilot.lane_topology.types import (
 )
 
 MAX_ABSOLUTE_LANE_INDEX = 12
+# Only used to bound how many lanes the ego-to-anchor span could be hiding. It is
+# a nominal, not a claim about the road: it must stay below ``MAX_LANE_WIDTH_M``
+# or a missing divider reads as one wide lane instead of two lanes.
+DEFAULT_NOMINAL_LANE_WIDTH_M = 3.5
 DEFAULT_MIN_CONFIDENCE = 0.35
 DEFAULT_MIN_STABLE_SAMPLES = 3
 DEFAULT_MAX_GAP_NS = 700_000_000
@@ -91,6 +96,7 @@ class AbsoluteLaneGate:
   def __init__(self, *, min_stable_samples: int = DEFAULT_MIN_STABLE_SAMPLES,
                max_gap_ns: int = DEFAULT_MAX_GAP_NS, min_confidence: float = DEFAULT_MIN_CONFIDENCE,
                min_lane_width_m: float = MIN_LANE_WIDTH_M, max_lane_width_m: float = MAX_LANE_WIDTH_M,
+               nominal_lane_width_m: float = DEFAULT_NOMINAL_LANE_WIDTH_M,
                sample_x_m: float = SAMPLE_X_M):
     if min_stable_samples < 1:
       raise ValueError('min_stable_samples must be positive')
@@ -98,13 +104,14 @@ class AbsoluteLaneGate:
       raise ValueError('max_gap_ns must be positive')
     if not 0.0 <= min_confidence <= 1.0:
       raise ValueError('min_confidence must be within [0, 1]')
-    if not 0.0 < min_lane_width_m < max_lane_width_m:
+    if not 0.0 < min_lane_width_m < nominal_lane_width_m <= max_lane_width_m:
       raise ValueError('invalid lane width bounds')
     self.min_stable_samples = min_stable_samples
     self.max_gap_ns = max_gap_ns
     self.min_confidence = min_confidence
     self.min_lane_width_m = min_lane_width_m
     self.max_lane_width_m = max_lane_width_m
+    self.nominal_lane_width_m = nominal_lane_width_m
     self.sample_x_m = sample_x_m
     self.reset()
 
@@ -218,13 +225,19 @@ class RightEdgeAnchoredGate:
   opposing-direction separation, and a leading vehicle hides it exactly where it
   matters. The right side is what real observers do trace.
 
-  The anchor is the **outermost lane marking**, not the road edge. Measured on
-  one real 54.5 second segment, the model's right road edge sits a median of
-  2.1 m beyond the ego lane's right line and 67.6 percent of frames put that gap
-  in 1 to 2.5 m: that is a shoulder, and counting it as a lane would shift the
-  answer by exactly one. Any observed boundary beyond the anchor must therefore
-  be a road edge whose gaps are all narrower than one lane, otherwise the
-  carriageway has an unaccounted lane and the answer is refused.
+  **The anchor is a claim by the caller, not a fact this gate establishes.** The
+  caller says "this track id is the outermost same-direction lane marking", and
+  the gate can only corroborate that claim: a boundary beyond the anchor must be
+  observed and typed as a road edge, its strip must be narrower than one lane,
+  and no lane marking may lie beyond it. A single confident wrong index is worse
+  than an unknown, so a claim that cannot be corroborated is refused rather than
+  trusted. This gate does not discover the carriageway's extent on its own.
+
+  An earlier revision justified the anchor choice with "the road edge sits 2.1 m
+  beyond the ego lane's right line, so that gap is a shoulder". That reading was
+  wrong: the 2.1 m was mostly the lane between the ego line and the next line out
+  (2.37 m apart), not a shoulder. The geometric guard below is unchanged, because
+  it refuses either way, but the reasoning is retracted.
 
   The total comes from the navigation lane guidance, which is authoritative for
   how many same-direction lanes exist but says nothing about where the ego sits.
@@ -234,6 +247,7 @@ class RightEdgeAnchoredGate:
   def __init__(self, *, min_stable_samples: int = DEFAULT_MIN_STABLE_SAMPLES,
                max_gap_ns: int = DEFAULT_MAX_GAP_NS, min_confidence: float = DEFAULT_MIN_CONFIDENCE,
                min_lane_width_m: float = MIN_LANE_WIDTH_M, max_lane_width_m: float = MAX_LANE_WIDTH_M,
+               nominal_lane_width_m: float = DEFAULT_NOMINAL_LANE_WIDTH_M,
                sample_x_m: float = SAMPLE_X_M):
     if min_stable_samples < 1:
       raise ValueError('min_stable_samples must be positive')
@@ -241,13 +255,14 @@ class RightEdgeAnchoredGate:
       raise ValueError('max_gap_ns must be positive')
     if not 0.0 <= min_confidence <= 1.0:
       raise ValueError('min_confidence must be within [0, 1]')
-    if not 0.0 < min_lane_width_m < max_lane_width_m:
+    if not 0.0 < min_lane_width_m < nominal_lane_width_m <= max_lane_width_m:
       raise ValueError('invalid lane width bounds')
     self.min_stable_samples = min_stable_samples
     self.max_gap_ns = max_gap_ns
     self.min_confidence = min_confidence
     self.min_lane_width_m = min_lane_width_m
     self.max_lane_width_m = max_lane_width_m
+    self.nominal_lane_width_m = nominal_lane_width_m
     self.sample_x_m = sample_x_m
     self.reset()
 
@@ -302,14 +317,19 @@ class RightEdgeAnchoredGate:
     if not anchor.confidence >= self.min_confidence:
       return reject('lowConfidenceBoundary')
 
-    # Everything beyond the anchor must be a shoulder or edge strip narrower than
-    # a lane. Anything else is an unaccounted lane, so the count cannot be absolute.
+    # The claim under test is "nothing outboard of this anchor bounds a lane", so
+    # at least one outer boundary must actually be observed: a lone lane marking
+    # with empty space beyond it corroborates nothing, and refusing it is what
+    # stops a local view from being promoted to an absolute number.
+    beyond = ordered[anchor_index + 1:]
+    if not beyond:
+      return reject('rightBoundaryNotObserved')
     previous_y = anchor_y
-    for boundary in ordered[anchor_index + 1:]:
+    for boundary in beyond:
       if boundary.marking_type is not LaneMarkingType.roadEdge:
         return reject('unaccountedLaneBeyondAnchor')
       y = float(interpolate_y(boundary.points, self.sample_x_m))
-      if not 0.0 < previous_y - y < self.min_lane_width_m:
+      if not 0.0 <= previous_y - y < self.min_lane_width_m:
         return reject('unaccountedLaneBeyondAnchor')
       if not boundary.visible or not boundary.confidence >= self.min_confidence:
         return reject('lowConfidenceBoundary')
@@ -337,7 +357,15 @@ class RightEdgeAnchoredGate:
     if any(not self.min_lane_width_m <= gap <= self.max_lane_width_m for gap in gaps[1:]):
       return reject('implausibleLaneWidth')
 
+    # A missing divider next to the ego shows up as one wide first gap, which the
+    # width band alone can absorb: with a 5 m ceiling a 4.5 m gap still reads as
+    # one lane, and the answer comes out one too high. The span from the ego to
+    # the anchor must therefore be able to hold the number of lanes counted, using
+    # the nominal width as the floor on how many lanes it can hide.
     lanes_to_the_right = len(to_the_right)
+    hidden = math.ceil((ego_y_m - anchor_y) / self.nominal_lane_width_m) - 1
+    if lanes_to_the_right < max(0, hidden):
+      return reject('implausibleLaneWidth')
     if lanes_to_the_right > lane_total - 1:
       return reject('mapTotalInconsistent')
     lane_index = lane_total - lanes_to_the_right
