@@ -21,10 +21,13 @@ import math
 from pathlib import Path
 from typing import Any
 
-from openpilot.sunnypilot.lane_topology.absolute_lane import AbsoluteLaneGate
+from openpilot.sunnypilot.lane_topology.absolute_lane import AbsoluteLaneGate, RightEdgeAnchoredGate
 from openpilot.sunnypilot.lane_topology.types import LaneBoundary, LaneMarkingType, LaneTopologyState
 
 FRAMES_SCHEMA = "absolute-lane-frames-v1"
+BOTH_EDGES = "bothEdges"
+LANE_ANCHOR = "laneAnchor"
+GATES = (BOTH_EDGES, LANE_ANCHOR)
 REPORT_SCHEMA = "absolute-lane-report-v1"
 MAX_FRAMES = 100_000
 
@@ -71,7 +74,7 @@ def boundary_from_json(record: object) -> LaneBoundary:
                       confidence, visible=visible)
 
 
-def replay_frames(document: object, *, gate: AbsoluteLaneGate | None = None) -> dict[str, Any]:
+def replay_frames(document: object, *, gate=None) -> dict[str, Any]:
   if not isinstance(document, dict) or document.get('schema') != FRAMES_SCHEMA:
     raise ValueError('unsupported frames schema')
   segment = document.get('segment')
@@ -89,7 +92,13 @@ def replay_frames(document: object, *, gate: AbsoluteLaneGate | None = None) -> 
   if type(route_revision) is not int or route_revision < 0:
     raise ValueError('route_revision must be a non-negative integer')
 
-  lane_gate = gate if gate is not None else AbsoluteLaneGate()
+  # The anchored gate needs the map total; the both-edge gate needs two edges.
+  which = document.get('gate', BOTH_EDGES)
+  if which not in GATES:
+    raise ValueError('unsupported gate')
+  lane_gate = gate if gate is not None else (
+    RightEdgeAnchoredGate() if which == LANE_ANCHOR else AbsoluteLaneGate())
+  document_total = document.get('lane_total')
   records: list[dict[str, Any]] = []
   for index, frame in enumerate(frames):
     if not isinstance(frame, dict):
@@ -109,17 +118,35 @@ def replay_frames(document: object, *, gate: AbsoluteLaneGate | None = None) -> 
     boundaries = tuple(boundary_from_json(item) for item in frame.get('boundaries', []))
     if len({boundary.track_id for boundary in boundaries}) != len(boundaries):
       raise ValueError('duplicate track_id within one frame')
-    decision = lane_gate.update(
-      boundaries,
-      left_edge_track_id=frame.get('left_edge_track_id', -1),
-      right_edge_track_id=frame.get('right_edge_track_id', -1),
-      frame_id=frame_id,
-      timestamp_ns=capture,
-      session_id=frame_session,
-      route_revision=frame_revision,
-      topology_state=parse_topology_state(frame.get('topology_state')),
-      ego_y_m=_finite_number(frame.get('ego_y_m', 0.0), name='ego_y_m'),
-    )
+    topology_state = parse_topology_state(frame.get('topology_state'))
+    ego_y_m = _finite_number(frame.get('ego_y_m', 0.0), name='ego_y_m')
+    if which == LANE_ANCHOR:
+      lane_total = frame.get('lane_total', document_total)
+      if lane_total is not None and type(lane_total) is not int:
+        raise ValueError('lane_total must be an integer when present')
+      decision = lane_gate.update(
+        boundaries,
+        right_anchor_track_id=frame.get('right_anchor_track_id', -1),
+        lane_total=lane_total,
+        frame_id=frame_id,
+        timestamp_ns=capture,
+        session_id=frame_session,
+        route_revision=frame_revision,
+        topology_state=topology_state,
+        ego_y_m=ego_y_m,
+      )
+    else:
+      decision = lane_gate.update(
+        boundaries,
+        left_edge_track_id=frame.get('left_edge_track_id', -1),
+        right_edge_track_id=frame.get('right_edge_track_id', -1),
+        frame_id=frame_id,
+        timestamp_ns=capture,
+        session_id=frame_session,
+        route_revision=frame_revision,
+        topology_state=topology_state,
+        ego_y_m=ego_y_m,
+      )
     records.append({
       'frame_index': frame_id,
       'valid': decision.valid,
@@ -129,7 +156,7 @@ def replay_frames(document: object, *, gate: AbsoluteLaneGate | None = None) -> 
       'capture_mono_ns': decision.capture_mono_ns,
       'reason': decision.reason,
     })
-  return {'schema': REPORT_SCHEMA, 'segment': segment, 'records': records}
+  return {'schema': REPORT_SCHEMA, 'segment': segment, 'gate': which, 'records': records}
 
 
 def main() -> int:

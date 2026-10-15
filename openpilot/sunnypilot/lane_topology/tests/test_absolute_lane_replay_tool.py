@@ -9,6 +9,7 @@ from openpilot.sunnypilot.lane_topology.types import LaneMarkingType, LaneTopolo
 from tools.evaluate_absolute_lane_labels import evaluate_absolute_labels
 from tools.replay_absolute_lane import (
   FRAMES_SCHEMA,
+  LANE_ANCHOR,
   REPORT_SCHEMA,
   boundary_from_json,
   parse_marking_type,
@@ -175,3 +176,93 @@ def test_a_caller_supplied_gate_continues_its_stability_window():
   assert second['records'][-1]['stable_samples'] == 4 and second['records'][-1]['valid'] is True
   assert fresh['records'][-1]['stable_samples'] == 2 and fresh['records'][-1]['valid'] is False
   assert json.loads(json.dumps(fresh)) == fresh
+
+
+# --- anchored mode ---------------------------------------------------------
+
+ANCHOR = 5
+
+
+def anchored_boundaries() -> list[dict]:
+  """Four lanes, the outermost lane marking at -7.0 and a 2.1 m shoulder beyond."""
+  return [
+    {'track_id': 1, 'marking_type': 'doubleSolid', 'confidence': 0.9, 'points': [[0.0, 7.0], [30.0, 7.0]]},
+    {'track_id': 2, 'marking_type': 'dashed', 'confidence': 0.9, 'points': [[0.0, 3.5], [30.0, 3.5]]},
+    {'track_id': 3, 'marking_type': 'dashed', 'confidence': 0.9, 'points': [[0.0, 0.0], [30.0, 0.0]]},
+    {'track_id': 4, 'marking_type': 'dashed', 'confidence': 0.9, 'points': [[0.0, -3.5], [30.0, -3.5]]},
+    {'track_id': ANCHOR, 'marking_type': 'solid', 'confidence': 0.9, 'points': [[0.0, -7.0], [30.0, -7.0]]},
+    {'track_id': 6, 'marking_type': 'roadEdge', 'confidence': 0.9, 'points': [[0.0, -9.1], [30.0, -9.1]]},
+  ]
+
+
+def anchored_frame(frame_id: int, capture_ns: int, *, anchor: int = ANCHOR, ego_y_m: float = 1.75,
+                   lane_total: int | None = None, boundaries: list[dict] | None = None) -> dict:
+  record = {'frame_id': frame_id, 'capture_mono_ns': capture_ns, 'ego_y_m': ego_y_m,
+            'right_anchor_track_id': anchor,
+            'boundaries': boundaries if boundaries is not None else anchored_boundaries()}
+  if lane_total is not None:
+    record['lane_total'] = lane_total
+  return record
+
+
+def anchored_document(frames: list[dict], *, lane_total: int | None = 4) -> dict:
+  document = {'schema': FRAMES_SCHEMA, 'segment': 'drive-01', 'session_id': 'replay-session',
+              'route_revision': 1, 'gate': LANE_ANCHOR, 'frames': frames}
+  if lane_total is not None:
+    document['lane_total'] = lane_total
+  return document
+
+
+def test_the_anchored_gate_numbers_from_the_outermost_lane_marking():
+  report = replay_frames(anchored_document(
+    [anchored_frame(index, 1_000_000_000 + index * 100_000_000) for index in range(3)]))
+
+  assert report['gate'] == LANE_ANCHOR
+  assert [record['reason'] for record in report['records']] == ['stabilizing', 'stabilizing',
+                                                               'absoluteConfirmed']
+  confirmed = report['records'][-1]
+  assert confirmed['valid'] is True and confirmed['lane_index'] == 2 and confirmed['lane_count'] == 4
+
+
+def test_the_map_total_comes_from_the_document_unless_the_frame_overrides_it():
+  frames = [anchored_frame(index, 1_000_000_000 + index * 100_000_000) for index in range(3)]
+  # Three lines lie between this ego position and the anchor, so a three lane
+  # road cannot also contain it; the frame's own total overrides the document's.
+  frames[2] = {**frames[2], 'ego_y_m': 5.25, 'lane_total': 3}
+  assert replay_frames(anchored_document(frames))['records'][-1]['reason'] == 'mapTotalInconsistent'
+
+  # With the document total of four the same position is consistent, and the
+  # changed index restarts the window instead of being reported.
+  frames[2] = {**frames[2], 'lane_total': 4}
+  assert replay_frames(anchored_document(frames))['records'][-1]['reason'] == 'stabilizing'
+
+
+def test_an_absent_total_or_anchor_is_refused_and_reported():
+  without_total = anchored_document(
+    [anchored_frame(0, 1_000_000_000)], lane_total=None)
+  without_anchor = anchored_document([anchored_frame(0, 1_000_000_000, anchor=-1)])
+
+  assert replay_frames(without_total)['records'][-1]['reason'] == 'laneTotalUnavailable'
+  assert replay_frames(without_anchor)['records'][-1]['reason'] == 'laneAnchorNotObserved'
+
+
+def test_an_unsupported_gate_or_a_fractional_total_is_refused():
+  document = anchored_document([anchored_frame(0, 1_000_000_000)])
+
+  with pytest.raises(ValueError):
+    replay_frames({**document, 'gate': 'invented'})
+  with pytest.raises(ValueError):
+    replay_frames({**document, 'lane_total': 4.0})
+  with pytest.raises(ValueError):
+    replay_frames(anchored_document([anchored_frame(0, 1_000_000_000, lane_total=4.0)]))
+
+
+def test_an_anchored_report_still_scores_against_human_labels():
+  report = replay_frames(anchored_document(
+    [anchored_frame(index, 1_000_000_000 + index * 100_000_000) for index in range(3)]))
+  labels = {'schema': 'lane-position-ground-truth-v1', 'segment': 'drive-01',
+            'labels': [{'frame_index': 2, 'lane_index': 2, 'lane_count': 4}]}
+
+  metrics = evaluate_absolute_labels(report, labels)
+
+  assert metrics['known'] == 1 and metrics['correct'] == 1 and metrics['false_positives'] == 0
