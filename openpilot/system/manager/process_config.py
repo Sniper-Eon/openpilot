@@ -96,6 +96,11 @@ def record_route_video(started: bool, params: Params, CP: car.CarParams) -> bool
   return (get_hardware_profile() != HardwareProfile.C3XL and
           started and params.get_bool("RecordRoadVideo"))
 
+
+def lane_evidence_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return (started and get_hardware_profile() == HardwareProfile.C3XL and
+          os.environ.get("C3XL_LANE_EVIDENCE") == "1")
+
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
@@ -135,6 +140,8 @@ def mapd_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   return bool(os.path.exists(Paths.mapd_root()))
 
 def uploader_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
+  if get_hardware_profile() == HardwareProfile.C3XL and os.environ.get("C3XL_LANE_EVIDENCE") == "1":
+    return False
   if not params.get_bool("OnroadUploads"):
     return only_offroad(started, params, CP)
 
@@ -187,6 +194,7 @@ procs = [
   NativeProcess("loggerd", "openpilot/system/loggerd", ["./loggerd"], logging),
   PythonProcess("local_diagnosticsd", "openpilot.selfdrive.debug.local_diagnostics", c3xl_local_diagnostics),
   NativeProcess("encoderd", "openpilot/system/loggerd", ["./encoderd"], record_route_video),
+  PythonProcess("lane_evidenced", "openpilot.selfdrive.debug.lane_evidence", lane_evidence_ready),
   NativeProcess("stream_encoderd", "openpilot/system/loggerd", ["./encoderd", "--stream"], or_(livestream, notcar)),
   PythonProcess("logmessaged", "openpilot.system.logmessaged", always_run),
 

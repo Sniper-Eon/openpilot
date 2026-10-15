@@ -293,6 +293,7 @@ class TestLoggerd(OpenpilotTestCase):
 
   @pytest.mark.skipif(get_hardware_profile() != HardwareProfile.C3XL, reason="C3XL-specific logging policy")
   def test_c3xl_creates_qlog_without_rlog(self):
+    os.environ.pop("C3XL_LANE_EVIDENCE", None)
     self._publish_random_messages(["deviceState"])
 
     segment = self._get_latest_log_dir()
@@ -301,7 +302,21 @@ class TestLoggerd(OpenpilotTestCase):
     self._check_sentinel(list(LogReader(str(segment / "qlog.zst"))), True)
 
   @pytest.mark.skipif(get_hardware_profile() != HardwareProfile.C3XL, reason="C3XL-specific logging policy")
+  def test_c3xl_opt_in_records_full_model_and_navigation(self):
+    os.environ["C3XL_LANE_EVIDENCE"] = "1"
+    services = ["modelV2", "navAssistStateSP", "laneTopologyStateSP"]
+    sent = self._publish_random_messages(services)
+    segment = self._get_latest_log_dir()
+    assert (segment / "rlog.zst").is_file()
+    received = defaultdict(list)
+    for message in LogReader(str(segment / "rlog.zst")):
+      received[message.which()].append(message)
+    for name in services:
+      assert len(received[name]) == len(sent[name])
+
+  @pytest.mark.skipif(get_hardware_profile() != HardwareProfile.C3XL, reason="C3XL-specific logging policy")
   def test_c3xl_diverts_local_feature_messages_out_of_qlog(self):
+    os.environ.pop("C3XL_LANE_EVIDENCE", None)
     services = ["chestnutState", "carStateSP", "longitudinalPlanSP", "trafficRadarState"]
     pm = messaging.PubMaster(services)
     managed_processes["loggerd"].start()

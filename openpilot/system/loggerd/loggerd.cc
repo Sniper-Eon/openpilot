@@ -14,8 +14,14 @@
 
 ExitHandler do_exit;
 
+// Opt-in local lane evidence: keep the standard rlog/encode-index contract so
+// wide camera video, primary geometry and navigation share device timestamps.
+const char *lane_evidence_env = std::getenv("C3XL_LANE_EVIDENCE");
+const bool full_route_recording = !sunnypilot::hardware::is_c3xl() ||
+                                 (lane_evidence_env && std::string(lane_evidence_env) == "1");
+
 struct LoggerdState {
-  LoggerState logger{Path::log_root(), !sunnypilot::hardware::is_c3xl()};
+  LoggerState logger{Path::log_root(), full_route_recording};
   std::atomic<double> last_camera_seen_tms{0.0};
   std::atomic<int> ready_to_rotate{0};  // count of encoders ready to rotate
   int max_waiting = 0;
@@ -239,7 +245,7 @@ void loggerd_thread() {
     const bool record_audio = (it.name == "rawAudioData") && Params().getBool("RecordAudio");
     // C3XL local feature diagnostics are written by local_diagnosticsd into a
     // bounded stream. Standard devices retain the upstream rlog/qlog contract.
-    const bool diverted_local_diagnostic = sunnypilot::hardware::is_c3xl() && it.local_diagnostic_decimation >= 0;
+    const bool diverted_local_diagnostic = !full_route_recording && it.local_diagnostic_decimation >= 0;
     if ((it.should_log && !diverted_local_diagnostic) || (encoder && !livestream_encoder) || record_audio) {
       LOGD("logging %s", it.name.c_str());
 

@@ -5,11 +5,25 @@ from openpilot.sunnypilot.hardware.profile import HardwareProfile
 
 
 def test_c3xl_never_runs_route_video_encoder_even_with_stale_true_param(monkeypatch):
+  monkeypatch.delenv("C3XL_LANE_EVIDENCE", raising=False)
   params = Mock()
   params.get_bool.return_value = True
   monkeypatch.setattr(process_config, "get_hardware_profile", lambda: HardwareProfile.C3XL)
 
   assert not process_config.record_route_video(True, params, Mock())
+
+
+def test_c3xl_explicit_evidence_capture_runs_only_onroad(monkeypatch):
+  params = Mock()
+  params.get_bool.return_value = False
+  monkeypatch.setattr(process_config, "get_hardware_profile", lambda: HardwareProfile.C3XL)
+  monkeypatch.setenv("C3XL_LANE_EVIDENCE", "1")
+  assert process_config.lane_evidence_ready(True, params, Mock())
+  assert not process_config.lane_evidence_ready(False, params, Mock())
+  assert not process_config.record_route_video(True, params, Mock())
+  for flag in ("0", "true", "", "yes"):
+    monkeypatch.setenv("C3XL_LANE_EVIDENCE", flag)
+    assert not process_config.lane_evidence_ready(True, params, Mock())
 
 
 def test_standard_profile_still_follows_explicit_recording_param(monkeypatch):
@@ -19,6 +33,10 @@ def test_standard_profile_still_follows_explicit_recording_param(monkeypatch):
   params.get_bool.side_effect = lambda key: {"RecordRoadVideo": True}[key]
   assert process_config.record_route_video(True, params, Mock())
   assert not process_config.record_route_video(False, params, Mock())
+  params.get_bool.return_value = False
+  params.get_bool.side_effect = None
+  monkeypatch.setenv("C3XL_LANE_EVIDENCE", "1")
+  assert not process_config.record_route_video(True, params, Mock())
 
 
 def test_local_diagnostics_runs_onroad_only_for_c3xl(monkeypatch):
@@ -28,6 +46,17 @@ def test_local_diagnostics_runs_onroad_only_for_c3xl(monkeypatch):
 
   monkeypatch.setattr(process_config, "get_hardware_profile", lambda: HardwareProfile.STANDARD)
   assert not process_config.c3xl_local_diagnostics(True, Mock(), Mock())
+
+
+def test_evidence_stays_local_while_capture_mode_is_enabled(monkeypatch):
+  params = Mock()
+  params.get_bool.return_value = True
+  monkeypatch.setattr(process_config, "get_hardware_profile", lambda: HardwareProfile.C3XL)
+  monkeypatch.setenv("C3XL_LANE_EVIDENCE", "1")
+  assert not process_config.uploader_ready(True, params, Mock())
+  assert not process_config.uploader_ready(False, params, Mock())
+  monkeypatch.delenv("C3XL_LANE_EVIDENCE")
+  assert process_config.uploader_ready(False, params, Mock())
 
 
 def test_c3xl_uses_gpio_alerts_without_portaudio_processes(monkeypatch):
