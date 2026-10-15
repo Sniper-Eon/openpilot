@@ -11,7 +11,6 @@ import time
 import uuid
 from urllib.parse import urlparse
 
-import cv2
 import numpy as np
 import requests
 
@@ -41,7 +40,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict | None:
   return value
 
 
-def encode_nv12(frame) -> bytes:
+def export_nv12(frame) -> dict:
   width, height, stride, uv_offset = int(frame.width), int(frame.height), int(frame.stride), int(frame.uv_offset)
   if width % 2 or height % 2 or not (32 <= width <= 3840 and 32 <= height <= 2160) or stride < width or uv_offset < stride*height:
     raise ValueError('invalid NV12 frame')
@@ -50,28 +49,30 @@ def encode_nv12(frame) -> bytes:
     raise ValueError('truncated NV12 frame')
   y = data[:stride*height].reshape(height, stride)[:, :width]
   uv = data[uv_offset:uv_offset + stride*(height//2)].reshape(height//2, stride)[:, :width].reshape(height//2, width//2, 2)
-  # Downsample before color conversion/JPEG to bound the device cost.
-  target_w = min(960, width)
-  target_w -= target_w % 2
-  target_h = max(32, round(height * target_w / width))
-  target_h -= target_h % 2
-  y = cv2.resize(y, (target_w, target_h), interpolation=cv2.INTER_AREA)
-  uv = cv2.resize(uv, (target_w//2, target_h//2), interpolation=cv2.INTER_AREA)
-  bgr = cv2.cvtColorTwoPlane(y, uv, cv2.COLOR_YUV2BGR_NV12)
-  ok, jpeg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
-  if not ok or jpeg.nbytes > 250_000:
-    raise ValueError('JPEG size out of range')
-  return jpeg.tobytes()
+  scale = min(640/width, 480/height, 1.0)
+  tw, th = int(width*scale)//2*2, int(height*scale)//2*2
+  if tw < 32 or th < 32:
+    raise ValueError('unsupported camera aspect ratio')
+  xs = np.linspace(0, width-1, tw).astype(np.int32)
+  ys = np.linspace(0, height-1, th).astype(np.int32)
+  # Keep the chroma samples aligned with the corresponding sampled Y blocks.
+  small_y = y[ys[:,None], xs[None,:]]
+  small_uv = uv[(ys[::2]//2)[:,None], (xs[::2]//2)[None,:]]
+  raw = small_y.tobytes() + small_uv.tobytes()
+  return {'nv12': base64.b64encode(raw).decode(), 'width': tw, 'height': th}
 
 
-def request_result(config: dict, frame: dict, jpeg: bytes, *, session=None, now_ns=None) -> dict:
+def request_result(config: dict, frame: dict, image: bytes | dict, *, session=None, now_ns=None) -> dict:
   validate_frame(frame)
+  payload = {'jpeg': base64.b64encode(image).decode()} if isinstance(image, bytes) else image
+  if not isinstance(payload, dict) or set(payload) not in ({'jpeg'}, {'nv12', 'width', 'height'}):
+    raise ValueError('invalid image payload')
   client = session or requests.Session()
   if session is None:
     client.trust_env = False
   try:
     with client.post(config['url'].rstrip('/') + '/infer',
-                     json={**frame, 'jpeg': base64.b64encode(jpeg).decode()},
+                     json={**frame, **payload},
                      headers={'Authorization': 'Bearer ' + config['token']},
                      timeout=(0.25, 1.0), allow_redirects=False, stream=True) as response:
       if response.status_code != 200:
@@ -130,7 +131,6 @@ def main():
   from openpilot.sunnypilot.navassist.settings import atomic_json
   from openpilot.common.swaglog import cloudlog
   from openpilot.common.params import Params
-  cv2.setNumThreads(1)
   config = load_config()
   if config is None:
     return
@@ -180,14 +180,14 @@ def main():
             raise ValueError('paired host not found')
         else:
           endpoint = config['url']
-        result = request_result(config | {'url': endpoint}, frame, encode_nv12(camera), session=http)
+        result = request_result(config | {'url': endpoint}, frame, export_nv12(camera), session=http)
         key = (result['visible_lane_count'], result['ego_lane_index']) if result['valid'] else None
         stable = stable + 1 if key is not None and key == last_index else 1
         last_index = key
         if stable < 3 or key is None:
           result.update(valid=False, visible_lane_count=0, ego_lane_index=-1, score=0, reason='stabilizing')
         atomic_json(RESULT_PATH, result)
-      except (ValueError, OSError, requests.RequestException, cv2.error) as error:
+      except (ValueError, OSError, requests.RequestException ) as error:
         endpoint = None
         last_index, stable = None, 0
         RESULT_PATH.unlink(missing_ok=True)

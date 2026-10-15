@@ -91,16 +91,26 @@ class Handler(BaseHTTPRequestHandler):
         raise ValueError('oversized request')
       value = json.loads(self.rfile.read(size))
       validate_frame(value)
-      image_bytes = base64.b64decode(value['jpeg'], validate=True)
-      # Verify dimensions before allocation/decode, including decompression bombs.
-      from PIL import Image
-      import io
-      with Image.open(io.BytesIO(image_bytes)) as header:
-        if header.format != 'JPEG' or not (32 <= header.width <= 1280 and 32 <= header.height <= 960):
-          raise ValueError('invalid JPEG dimensions')
-      image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-      if image is None:
-        raise ValueError('invalid JPEG')
+      if 'nv12' in value and 'jpeg' not in value:
+        w, h = value.get('width'), value.get('height')
+        if type(w) is not int or type(h) is not int or not (32 <= w <= 640 and 32 <= h <= 480) or w%2 or h%2:
+          raise ValueError('invalid raw frame dimensions')
+        raw = base64.b64decode(value['nv12'], validate=True)
+        if len(raw) != w*h*3//2:
+          raise ValueError('truncated raw frame')
+        image = cv2.cvtColor(np.frombuffer(raw,np.uint8).reshape(h*3//2,w),cv2.COLOR_YUV2BGR_NV12)
+      elif 'jpeg' in value and 'nv12' not in value:
+        image_bytes = base64.b64decode(value['jpeg'], validate=True)
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(image_bytes)) as header:
+          if header.format != 'JPEG' or not (32 <= header.width <= 1280 and 32 <= header.height <= 960):
+            raise ValueError('invalid JPEG dimensions')
+        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+          raise ValueError('invalid JPEG')
+      else:
+        raise ValueError('missing image payload')
       result = self.server.model.infer(image, value)
       self.server.last_result = result
       self.server.count += 1

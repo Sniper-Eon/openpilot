@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 
 VERSION = 1
-MAX_BODY = 400_000
+MAX_BODY = 800_000
 MAX_RESPONSE = 32_768
 MAX_AGE_NS = 2_000_000_000
 RESULT_PATH = Path('/dev/shm/external_lane_observation.json')

@@ -14,7 +14,7 @@ import requests
 
 from openpilot.sunnypilot.lane_topology.external.protocol import ResultCache, validate_frame, validate_result
 from openpilot.sunnypilot.lane_topology.external.perception import observation, trace_boundaries
-from openpilot.sunnypilot.lane_topology.external.sender import encode_nv12, load_config, request_result, primary_has_budget
+from openpilot.sunnypilot.lane_topology.external.sender import export_nv12, load_config, request_result, primary_has_budget
 from openpilot.sunnypilot.lane_topology.external.server import LaneServer
 from openpilot.selfdrive.ui.sunnypilot.onroad.lane_navigation_state import LaneOverlayDisplay, lane_display_with_external
 
@@ -99,11 +99,13 @@ def test_nv12_stride_and_padding_are_not_interpreted_as_image_pixels():
   data[:stride*h].reshape(h,stride)[:,:w] = 100
   data[uv_offset:].reshape(h//2,stride)[:,:w] = 128
   f = SimpleNamespace(width=w,height=h,stride=stride,uv_offset=uv_offset,data=data)
-  image = cv2.imdecode(np.frombuffer(encode_nv12(f),np.uint8),cv2.IMREAD_COLOR)
+  payload = export_nv12(f)
+  raw = np.frombuffer(base64.b64decode(payload['nv12']),np.uint8).reshape(h*3//2,w)
+  image = cv2.cvtColor(raw,cv2.COLOR_YUV2BGR_NV12)
   assert image.shape == (h,w,3)
   assert image.max()-image.min() <= 3
   with pytest.raises(ValueError):
-    encode_nv12(SimpleNamespace(**(vars(f) | {'data': data[:100]})))
+    export_nv12(SimpleNamespace(**(vars(f) | {'data': data[:100]})))
 
 
 @pytest.mark.parametrize('url', ['http://8.8.8.8:7788','https://192.168.1.2','http://u:p@192.168.1.2','http://192.168.1.2/path'])
@@ -214,3 +216,17 @@ def test_real_capnp_calibration_projects_ground_below_horizon():
     lane.x=[0.,20.];lane.z=[1.3,1.3]
   sm['extrinsicsCalibration']=calibration.as_reader();sm['modelV2']=line.as_reader()
   assert calibrated_ego_point(sm) == pytest.approx(point)
+
+
+def test_raw_nv12_http_roundtrip(server):
+  s,m,config=server
+  raw=np.full(64*48*3//2,128,np.uint8)
+  result=request_result(config,frame(),{'nv12':base64.b64encode(raw).decode(),'width':64,'height':48})
+  assert result['valid'] and s.count==1
+
+
+def test_raw_frame_length_is_checked_before_decode(server):
+  s,m,config=server
+  payload=frame()|{'nv12':'YWJj','width':640,'height':480}
+  response=requests.post(config['url']+'/infer',json=payload,headers={'Authorization':'Bearer '+config['token']},timeout=2)
+  assert response.status_code==400 and s.count==0
