@@ -201,3 +201,131 @@ class AbsoluteLaneGate:
       return AbsoluteLaneDecision.unknown('stabilizing', stable_samples=self._count,
                                           capture_mono_ns=timestamp_ns)
     return AbsoluteLaneDecision(True, lane_index, lane_count, self._count, timestamp_ns, 'absoluteConfirmed')
+
+
+class RightEdgeAnchoredGate:
+  """Absolute index from a confirmed right carriageway edge plus a map total.
+
+  Requiring both carriageway edges is what the shipped gate does, and on real
+  wide-camera frames the left one is the boundary that is never found: it is the
+  median or the opposing-direction separation, and a leading vehicle hides it
+  exactly where it matters. The right edge is the shoulder line, and that is the
+  boundary real observers do trace.
+
+  So this gate anchors on the right edge alone and takes the total from the
+  navigation lane guidance, which is authoritative for how many same-direction
+  lanes exist but says nothing about where the ego sits. Vision supplies the
+  anchor, the map supplies the count; neither is asked to do the other's job.
+
+  It still refuses whenever the anchor is unconfirmed, whenever an interior line
+  between the ego and the right edge is missing, and whenever the count implied
+  by the anchor contradicts the map total.
+  """
+
+  def __init__(self, *, min_stable_samples: int = DEFAULT_MIN_STABLE_SAMPLES,
+               max_gap_ns: int = DEFAULT_MAX_GAP_NS, min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+               min_lane_width_m: float = MIN_LANE_WIDTH_M, max_lane_width_m: float = MAX_LANE_WIDTH_M,
+               sample_x_m: float = SAMPLE_X_M):
+    if min_stable_samples < 1:
+      raise ValueError('min_stable_samples must be positive')
+    if not 0 < max_gap_ns:
+      raise ValueError('max_gap_ns must be positive')
+    if not 0.0 <= min_confidence <= 1.0:
+      raise ValueError('min_confidence must be within [0, 1]')
+    if not 0.0 < min_lane_width_m < max_lane_width_m:
+      raise ValueError('invalid lane width bounds')
+    self.min_stable_samples = min_stable_samples
+    self.max_gap_ns = max_gap_ns
+    self.min_confidence = min_confidence
+    self.min_lane_width_m = min_lane_width_m
+    self.max_lane_width_m = max_lane_width_m
+    self.sample_x_m = sample_x_m
+    self.reset()
+
+  def reset(self) -> None:
+    self._key: tuple[int, int] | None = None
+    self._count = 0
+    self._identity: tuple[str, int] | None = None
+    self._last_ns: int | None = None
+
+  def update(self, boundaries: tuple[LaneBoundary, ...], *, right_edge_track_id: int,
+             lane_total: int | None, frame_id: int, timestamp_ns: int, session_id: str,
+             route_revision: int, topology_state: LaneTopologyState = LaneTopologyState.normal,
+             ego_y_m: float = 0.0) -> AbsoluteLaneDecision:
+    del frame_id  # recorded by the caller; identity here is session plus route
+    identity = (session_id, route_revision)
+    if identity != self._identity:
+      self.reset()
+      self._identity = identity
+    if self._last_ns is not None and not 0 < timestamp_ns - self._last_ns <= self.max_gap_ns:
+      self._key, self._count = None, 0
+    self._last_ns = timestamp_ns
+
+    def reject(reason: str) -> AbsoluteLaneDecision:
+      self._key, self._count = None, 0
+      return AbsoluteLaneDecision.unknown(reason, capture_mono_ns=timestamp_ns)
+
+    # The map total is a requirement, not a hint: without it the anchor says how
+    # far the ego is from the shoulder, not which lane that is.
+    if type(lane_total) is not int or not 1 <= lane_total <= MAX_ABSOLUTE_LANE_INDEX:
+      return reject('laneTotalUnavailable')
+    if topology_state != LaneTopologyState.normal:
+      return reject(f'topology:{topology_state.name}')
+
+    positioned: list[tuple[float, LaneBoundary]] = []
+    for boundary in boundaries:
+      y = interpolate_y(boundary.points, self.sample_x_m)
+      if y is not None:
+        positioned.append((y, boundary))
+    positioned.sort(key=lambda item: item[0], reverse=True)
+    ordered = [boundary for _, boundary in positioned]
+    track_ids = [boundary.track_id for boundary in ordered]
+    if right_edge_track_id not in track_ids:
+      return reject('carriagewayEdgeNotObserved')
+    right_index = track_ids.index(right_edge_track_id)
+    # Anything observed to the right of the claimed edge leaves a lane unaccounted.
+    if right_index != len(ordered) - 1:
+      return reject('boundaryOutsideCarriageway')
+    if ordered[right_index].marking_type not in RIGHT_EDGE_MARKINGS:
+      return reject('edgeMarkingNotConfirmed')
+    if not ordered[right_index].visible:
+      return reject('edgeNotVisible')
+    if not ordered[right_index].confidence >= self.min_confidence:
+      return reject('lowConfidenceBoundary')
+
+    # Every boundary strictly right of the ego is one more lane to its right.
+    to_the_right = [boundary for boundary in ordered[right_index::-1]
+                    if boundary.track_id != right_edge_track_id
+                    and float(interpolate_y(boundary.points, self.sample_x_m)) < ego_y_m]
+    if any(not boundary.visible for boundary in to_the_right):
+      return reject('interiorBoundaryNotVisible')
+    if any(not boundary.confidence >= self.min_confidence for boundary in to_the_right):
+      return reject('lowConfidenceBoundary')
+
+    right_edge_y = float(interpolate_y(ordered[right_index].points, self.sample_x_m))
+    interior = sorted((float(interpolate_y(boundary.points, self.sample_x_m))
+                       for boundary in to_the_right), reverse=True)
+    ladder = [float(ego_y_m), *interior, right_edge_y]
+    gaps = [ladder[index] - ladder[index + 1] for index in range(len(ladder) - 1)]
+    # The ego may sit anywhere inside its lane, so only the first gap is unbounded
+    # below. Gaps between real lane lines must be single lane widths: a missing
+    # line reads as an over-wide gap and a double-counted line as a narrow one.
+    if not 0.0 < gaps[0] <= self.max_lane_width_m:
+      return reject('implausibleLaneWidth')
+    if any(not self.min_lane_width_m <= gap <= self.max_lane_width_m for gap in gaps[1:]):
+      return reject('implausibleLaneWidth')
+
+    lanes_to_the_right = len(to_the_right)
+    if lanes_to_the_right > lane_total - 1:
+      return reject('mapTotalInconsistent')
+    lane_index = lane_total - lanes_to_the_right
+    if not 1 <= lane_index <= lane_total <= MAX_ABSOLUTE_LANE_INDEX:
+      return reject('laneRangeExceeded')
+
+    key = (lane_index, lane_total)
+    self._count = self._count + 1 if key == self._key else 1
+    self._key = key
+    if self._count < self.min_stable_samples:
+      return AbsoluteLaneDecision.unknown('stabilizing', stable_samples=self._count,
+                                          capture_mono_ns=timestamp_ns)
+    return AbsoluteLaneDecision(True, lane_index, lane_total, self._count, timestamp_ns, 'absoluteConfirmed')
