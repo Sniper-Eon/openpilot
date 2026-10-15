@@ -69,3 +69,28 @@ def test_udp_silently_drops_replay_malformed_oversize_and_rate_limited_data():
     assert 'session-a' not in json.dumps(stats)
   finally:
     stop_server(server, thread)
+
+
+def test_lane_position_query_is_opt_in_and_bound_to_latest_navigation(monkeypatch):
+  _, server, thread = run_server()
+  try:
+    query = {"messageType": "lane_position_request", "sessionId": "session-a", "sequence": 1}
+    port=server.server_address[1]
+    assert send(port,json.dumps(query).encode()) is None
+    legacy=send(port,encode(payload()))
+    assert 'lanePosition' not in legacy
+    feedback=send(port,json.dumps(query).encode())
+    assert feedback['lanePosition']['valid'] is False
+    assert feedback['lanePosition']['laneIndex'] is None
+    assert feedback['sessionId']=='session-a' and feedback['sequence']==1
+    from openpilot.sunnypilot.navassist import udp_receiver
+    monkeypatch.setattr(udp_receiver, 'lane_position_feedback',
+                        lambda snapshot: feedback['lanePosition'] | {'valid':True,'laneIndex':2,'laneCount':4})
+    numbered=send(port,json.dumps(query).encode())
+    assert numbered['lanePosition']['laneIndex']==2
+    assert numbered['lanePosition']['laneCount']==4
+    assert send(port,json.dumps(query | {'sessionId':'old'}).encode()) is None
+    assert send(port,json.dumps(query | {'sequence':True}).encode()) is None
+    assert send(port,json.dumps(query | {'sequence':2}).encode()) is None
+  finally:
+    stop_server(server,thread)

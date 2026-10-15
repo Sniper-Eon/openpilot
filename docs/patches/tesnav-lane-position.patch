@@ -1,0 +1,458 @@
+From b583820fda8a7a125e026ec13f33f3e0acbe9d25 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=A2=81=E5=AE=B6=E5=81=A5?=
+ <liangjiajian@liangjiajiandeMacBook-Air.local>
+Date: Thu, 15 Oct 2026 21:36:29 +0800
+Subject: [PATCH] Receive explicit camera lane positions without changing OEM
+ permissions
+
+Query lane position separately from navigation snapshots; validate expiry and session matching, render exact numbered lanes, and invalidate on route mismatch or inconsistent lane counts. Keep a separate installable test app variant.
+
+Validation: Android APK builds; 301 unit tests pass, one existing test skipped.
+
+Assisted-by: Codex
+---
+ app/build.gradle.kts                          |  5 +-
+ .../tesnav/export/UdpNavAssistV3Client.kt     | 61 +++++++++++++++----
+ .../garan/tesnav/model/CameraLanePosition.kt  | 24 ++++++++
+ .../garan/tesnav/model/OemVehicleLaneState.kt | 26 +++++---
+ .../garan/tesnav/ui/LaneGuidancePresenter.kt  | 28 ++++++---
+ .../export/CameraLanePositionParserTest.kt    | 43 +++++++++++++
+ .../tesnav/model/OemVehicleLaneStateTest.kt   | 22 +++++++
+ .../tesnav/ui/LaneGuidancePresenterTest.kt    | 19 ++++++
+ 8 files changed, 198 insertions(+), 30 deletions(-)
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/model/CameraLanePosition.kt
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/export/CameraLanePositionParserTest.kt
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 495f4e1..3a21675 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -55,10 +55,11 @@ android {
+     buildTypes {
+         create("tenengkai") {
+             initWith(getByName("debug"))
+-            applicationIdSuffix = ".tenengkai"
++            val laneTest = providers.gradleProperty("LANE_FEEDBACK_TEST_APP").orNull == "true"
++            applicationIdSuffix = if (laneTest) ".tenengkai.lanefeedback" else ".tenengkai"
+             matchingFallbacks += listOf("debug")
+             buildConfigField("boolean", "EXTENDED_NAV_SOURCES", "true")
+-            manifestPlaceholders["APP_NAME"] = "特会开"
++            manifestPlaceholders["APP_NAME"] = if (laneTest) "特会开车道测试" else "特会开"
+             manifestPlaceholders["AMAP_API_KEY"] =
+                 providers.gradleProperty("TENENGKAI_AMAP_API_KEY").orNull
+                     ?: providers.gradleProperty("AMAP_API_KEY").orNull
+diff --git a/app/src/main/kotlin/com/garan/tesnav/export/UdpNavAssistV3Client.kt b/app/src/main/kotlin/com/garan/tesnav/export/UdpNavAssistV3Client.kt
+index d788318..7759e20 100644
+--- a/app/src/main/kotlin/com/garan/tesnav/export/UdpNavAssistV3Client.kt
++++ b/app/src/main/kotlin/com/garan/tesnav/export/UdpNavAssistV3Client.kt
+@@ -12,6 +12,7 @@ import com.google.gson.stream.JsonReader
+ import com.google.gson.stream.JsonToken
+ import java.io.StringReader
+ import com.garan.tesnav.model.OemLanePosition
++import com.garan.tesnav.model.CameraLanePosition
+ import com.garan.tesnav.model.OemVehicleLaneState
+ import com.garan.tesnav.model.C3LaneDecision
+ import com.garan.tesnav.model.OemNavigationTelemetry
+@@ -35,11 +36,22 @@ data class LaneAnnouncement(val id: String, val sessionId: String, val direction
+ 
+ internal data class NavAssistV3UdpAck(val host: String, val vehicleLane: OemVehicleLaneState?, val announcement: LaneAnnouncement? = null)
+ 
++/** Merge optional replies for one session/sequence without replacing OEM permissions. */
++internal fun mergeCameraReply(previous: NavAssistV3UdpAck?, incoming: NavAssistV3UdpAck): NavAssistV3UdpAck {
++    if (previous == null) return incoming
++    val old = previous.vehicleLane
++    val next = incoming.vehicleLane
++    val camera = next?.cameraLanePosition ?: old?.cameraLanePosition
++    val base = if (next?.cameraLanePosition != null && old != null) old else next ?: old
++    return incoming.copy(vehicleLane = base?.copy(cameraLanePosition = camera),
++        announcement = incoming.announcement ?: previous.announcement)
++}
++
+ /** Reads the existing ACK and flat feedback shape; malformed packets never escape the receive loop. */
+ internal object NavAssistV3AckParser {
+     const val MAX_ACK_BYTES = 2 * 1024
+     private val REQUIRED_ACK_KEYS = setOf("messageType", "schemaVersion", "sessionId", "sequence")
+-    private val ALLOWED_ACK_KEYS = REQUIRED_ACK_KEYS + setOf("vehicleLane", "vehicleTelemetry", "laneAnnouncement", "laneDecision")
++    private val ALLOWED_ACK_KEYS = REQUIRED_ACK_KEYS + setOf("vehicleLane", "vehicleTelemetry", "laneAnnouncement", "laneDecision", "lanePosition")
+     private val TELEMETRY_KEYS = setOf(
+         "gpsStatus", "latitude", "longitude", "accuracyValue", "hdop", "headingDeg", "speedValue",
+         "mapAvailable", "controllerHealth", "alcState", "forkState", "abortReason", "navAvailable",
+@@ -56,7 +68,7 @@ internal object NavAssistV3AckParser {
+ 
+     fun parse(
+         payload: ByteArray, host: String, sessionId: String, sequence: Long,
+-        receivedAtMs: Long, receivedAtElapsedMs: Long,
++        receivedAtMs: Long, receivedAtElapsedMs: Long, transportAgeMs: Long = 0L,
+     ): NavAssistV3UdpAck? = runCatching {
+         require(payload.isNotEmpty() && payload.size <= MAX_ACK_BYTES && sequence > 0)
+         val ack = JsonReader(StringReader(payload.decodeToString(throwOnInvalidSequence = true))).use { reader ->
+@@ -69,6 +81,23 @@ internal object NavAssistV3AckParser {
+         require(string(ack, "messageType") == "navassist_udp_ack")
+         require(integer(ack, "schemaVersion") == NavAssistV2Protocol.SCHEMA_VERSION.toLong())
+         require(string(ack, "sessionId") == sessionId && integer(ack, "sequence") == sequence)
++        val cameraPosition = runCatching {
++            ack.getAsJsonObject("lanePosition")?.let { value ->
++                require(value.keySet() == setOf("version", "valid", "laneIndex", "laneCount", "numbering",
++                    "source", "ageMs", "validForMs", "routeRevision"))
++                require(integer(value, "version") == 1L)
++                require(string(value, "numbering") == "leftToRight" && string(value, "source") == "commaCamera")
++                require(transportAgeMs in 0L..2_000L)
++                val valid = boolean(value, "valid")
++                val count = if (value["laneCount"].isJsonNull) null else integer(value, "laneCount", 1L..12L).toInt()
++                val index = if (value["laneIndex"].isJsonNull) null else integer(value, "laneIndex", 1L..12L).toInt()
++                val age = integer(value, "ageMs", 0L..2_000L) + transportAgeMs
++                val ttl = integer(value, "validForMs", 1L..2_000L)
++                require(if (valid) index != null && (count == null || index <= count) else index == null)
++                CameraLanePosition(valid, index, count, age, ttl, receivedAtElapsedMs,
++                    integer(value, "routeRevision", 0L..Long.MAX_VALUE)).forDisplay(receivedAtElapsedMs)
++            }
++        }.getOrNull()
+         val feedback = runCatching feedback@{
+             val lane = ack.getAsJsonObject("vehicleLane") ?: return@feedback null
+             require(lane.keySet() == VEHICLE_LANE_KEYS)
+@@ -123,9 +152,9 @@ internal object NavAssistV3AckParser {
+                 LaneAnnouncement(id, sessionId, direction, receivedAtElapsedMs)
+             }
+         }.getOrNull()
+-        NavAssistV3UdpAck(host, if (telemetry == null && decision == null) feedback else
++        NavAssistV3UdpAck(host, if (telemetry == null && decision == null && cameraPosition == null) feedback else
+             (feedback ?: OemVehicleLaneState(receivedAtMs = receivedAtMs, receivedAtElapsedMs = receivedAtElapsedMs))
+-                .copy(navigationTelemetry = telemetry, c3LaneDecision = decision), announcement)
++                .copy(navigationTelemetry = telemetry, c3LaneDecision = decision, cameraLanePosition = cameraPosition), announcement)
+     }.getOrNull()
+ 
+     private fun readObject(reader: JsonReader, allowFeedback: Boolean = false): JsonObject {
+@@ -139,7 +168,7 @@ internal object NavAssistV3AckParser {
+                 JsonToken.NUMBER -> JsonParser.parseString(reader.nextString())
+                 JsonToken.BOOLEAN -> JsonPrimitive(reader.nextBoolean())
+                 JsonToken.NULL -> { reader.nextNull(); JsonNull.INSTANCE }
+-                JsonToken.BEGIN_OBJECT -> if (allowFeedback && key in setOf("vehicleLane", "vehicleTelemetry", "laneAnnouncement", "laneDecision")) readObject(reader) else {
++                JsonToken.BEGIN_OBJECT -> if (allowFeedback && key in setOf("vehicleLane", "vehicleTelemetry", "laneAnnouncement", "laneDecision", "lanePosition")) readObject(reader) else {
+                     reader.skipValue(); JsonArray() // Preserve an invalid composite, not a nullable number.
+                 }
+                 else -> { reader.skipValue(); JsonArray() }
+@@ -244,7 +273,7 @@ internal class JvmUdpNavAssistV3Client(private val trace: ((String) -> Unit)? =
+     override fun send(body: ByteArray, sessionId: String, sequence: Long): NavAssistV3UdpAck? {
+         require(body.isNotEmpty() && body.size <= MAX_SNAPSHOT_BYTES) { "UDP snapshot is too large" }
+         val startNs = System.nanoTime()
+-        val startElapsedMs = if (trace != null) SystemClock.elapsedRealtime() else 0L
++        val startElapsedMs = SystemClock.elapsedRealtime()
+         val events = if (trace != null) StringBuilder() else null
+         var localPort = -1
+         var outcome = "unfinished"
+@@ -263,9 +292,17 @@ internal class JvmUdpNavAssistV3Client(private val trace: ((String) -> Unit)? =
+                 val targets = deliveryTargets(networkIdentity(), ::broadcastTargets)
+                 val directHost = discoveredHost
+                 mark("mode=${if (directHost == null) "discovery" else "direct"}")
++                val positionQuery = JsonObject().apply {
++                    addProperty("messageType", "lane_position_request")
++                    addProperty("sessionId", sessionId)
++                    addProperty("sequence", sequence)
++                }.toString().encodeToByteArray()
+                 val sent = targets.count { target ->
+                     runCatching { socket.send(DatagramPacket(body, body.size, target, UDP_PORT)) }
+-                        .onSuccess { mark("send=${target.hostAddress}:ok") }
++                        .onSuccess {
++                            mark("send=${target.hostAddress}:ok")
++                            runCatching { socket.send(DatagramPacket(positionQuery, positionQuery.size, target, UDP_PORT)) }
++                        }
+                         .onFailure { mark("send=${target.hostAddress}:${it.javaClass.simpleName}") }.isSuccess
+                 }
+                 if (sent == 0) error("no usable broadcast interface")
+@@ -293,17 +330,15 @@ internal class JvmUdpNavAssistV3Client(private val trace: ((String) -> Unit)? =
+                     val ack = NavAssistV3AckParser.parse(
+                         packet.data.copyOfRange(packet.offset, packet.offset + packet.length),
+                         source.hostAddress ?: continue, sessionId, sequence,
+-                        System.currentTimeMillis(), receivedAtElapsedMs,
++                        System.currentTimeMillis(), receivedAtElapsedMs, receivedAtElapsedMs - startElapsedMs,
+                     )
+                     if (ack == null) { mark("reject=parse_or_sequence"); continue }
+                     if (legacyAck != null && ack.host != legacyAck.host) { mark("reject=host"); continue }
+                     mark("accepted=${ack.host}")
+                     if (ack.announcement != null) return finish(ack, "announcement")
+-                    if (legacyAck == null || ack.vehicleLane?.navigationTelemetry != null) {
+-                        legacyAck = ack
+-                        // Bound a short grace window for UDP reordering; old C3 remains compatible.
+-                        deadlineNs = minOf(deadlineNs, System.nanoTime() + 30 * NANOS_PER_MILLISECOND)
+-                    }
++                    legacyAck = mergeCameraReply(legacyAck, ack)
++                    // Bound reordering, without dropping independent camera or OEM feedback.
++                    deadlineNs = minOf(deadlineNs, System.nanoTime() + 30 * NANOS_PER_MILLISECOND)
+                 }
+             }
+         } catch (error: Exception) {
+diff --git a/app/src/main/kotlin/com/garan/tesnav/model/CameraLanePosition.kt b/app/src/main/kotlin/com/garan/tesnav/model/CameraLanePosition.kt
+new file mode 100644
+index 0000000..ca4355d
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/model/CameraLanePosition.kt
+@@ -0,0 +1,24 @@
++package com.garan.tesnav.model
++
++/** Absolute road index, 1-based from the left. Never an OEM control permission. */
++data class CameraLanePosition(
++    val valid: Boolean,
++    val laneIndex: Int?,
++    val laneCount: Int?,
++    val ageAtReceiptMs: Long,
++    val validForMs: Long,
++    val receivedAtElapsedMs: Long,
++    val routeRevision: Long,
++) {
++    fun remainingMs(nowElapsedMs: Long): Long {
++        if (!valid || nowElapsedMs < receivedAtElapsedMs) return 0L
++        return (validForMs - ageAtReceiptMs - (nowElapsedMs - receivedAtElapsedMs)).coerceAtLeast(0L)
++    }
++
++    fun forDisplay(nowElapsedMs: Long): CameraLanePosition =
++        if (remainingMs(nowElapsedMs) > 0L) this else copy(valid = false, laneIndex = null)
++
++    fun label(): String = if (valid && laneIndex != null) {
++        if (laneCount != null) "第 $laneIndex／$laneCount 车道" else "第 $laneIndex 车道"
++    } else "未知"
++}
+diff --git a/app/src/main/kotlin/com/garan/tesnav/model/OemVehicleLaneState.kt b/app/src/main/kotlin/com/garan/tesnav/model/OemVehicleLaneState.kt
+index 3742f44..2fd3282 100644
+--- a/app/src/main/kotlin/com/garan/tesnav/model/OemVehicleLaneState.kt
++++ b/app/src/main/kotlin/com/garan/tesnav/model/OemVehicleLaneState.kt
+@@ -36,6 +36,7 @@ data class OemVehicleLaneState(
+     val receivedAtElapsedMs: Long? = null,
+     val navigationTelemetry: OemNavigationTelemetry? = null,
+     val c3LaneDecision: C3LaneDecision? = null,
++    val cameraLanePosition: CameraLanePosition? = null,
+ ) {
+     fun remainingDisplayMs(nowElapsedMs: Long, budgetMs: Long): Long {
+         val received = receivedAtElapsedMs ?: return 0L
+@@ -44,8 +45,11 @@ data class OemVehicleLaneState(
+         return if (age >= budgetMs) 0L else budgetMs - age
+     }
+ 
+-    fun forDisplay(nowElapsedMs: Long, budgetMs: Long): OemVehicleLaneState =
+-        if (remainingDisplayMs(nowElapsedMs, budgetMs) > 0L) this else unavailableForDisplay()
++    fun forDisplay(nowElapsedMs: Long, budgetMs: Long): OemVehicleLaneState {
++        if (remainingDisplayMs(nowElapsedMs, budgetMs) <= 0L) return unavailableForDisplay()
++        val camera = cameraLanePosition?.forDisplay(nowElapsedMs)
++        return if (camera === cameraLanePosition) this else copy(cameraLanePosition = camera)
++    }
+ 
+     internal fun unavailableForDisplay() = OemVehicleLaneState(receivedAtMs = receivedAtMs)
+ }
+@@ -56,11 +60,17 @@ internal fun Flow<OemVehicleLaneState>.withDisplayExpiry(
+     budgetMs: Long,
+     elapsedRealtimeMs: () -> Long,
+ ): Flow<OemVehicleLaneState> = transformLatest { state ->
+-    var remainingMs = state.remainingDisplayMs(elapsedRealtimeMs(), budgetMs)
+-    emit(if (remainingMs > 0L) state else state.unavailableForDisplay())
+-    while (remainingMs > 0L) {
+-        delay(remainingMs)
+-        remainingMs = state.remainingDisplayMs(elapsedRealtimeMs(), budgetMs)
+-        if (remainingMs == 0L) emit(state.unavailableForDisplay())
++    var emitted: OemVehicleLaneState? = null
++    while (true) {
++        val now = elapsedRealtimeMs()
++        val current = state.forDisplay(now, budgetMs)
++        if (current != emitted) {
++            emit(current)
++            emitted = current
++        }
++        val remaining = current.remainingDisplayMs(now, budgetMs)
++        if (remaining <= 0L) break
++        val cameraRemaining = current.cameraLanePosition?.takeIf { it.valid }?.remainingMs(now)
++        delay(minOf(remaining, cameraRemaining ?: remaining).coerceAtLeast(1L))
+     }
+ }
+diff --git a/app/src/main/kotlin/com/garan/tesnav/ui/LaneGuidancePresenter.kt b/app/src/main/kotlin/com/garan/tesnav/ui/LaneGuidancePresenter.kt
+index b34facc..7785677 100644
+--- a/app/src/main/kotlin/com/garan/tesnav/ui/LaneGuidancePresenter.kt
++++ b/app/src/main/kotlin/com/garan/tesnav/ui/LaneGuidancePresenter.kt
+@@ -35,6 +35,8 @@ object LaneGuidancePresenter {
+             OemLanePosition.SINGLE -> "单车道"
+             else -> "未知（未收到有效位置或回执已过期）"
+         }
++        val camera = cameraFor(state, oem)
++        val cameraText = camera?.label() ?: "未知"
+         val presentation = present(state, oem)
+         val recommendation = displayState(state, System.currentTimeMillis()).lanes.filter(LaneState::recommended).sortedBy(LaneState::index)
+             .joinToString("、") { "第${it.index + 1}车道" }.ifBlank { "暂无" }
+@@ -43,7 +45,7 @@ object LaneGuidancePresenter {
+             state.lanes.isEmpty() -> "高德未提供车道引导 · 无法判定"
+             else -> "${presentation?.title ?: "车道数据待确认"} · 无法判定"
+         }
+-        return "车道级引导（从左向右编号）\n高德推荐：$recommendation\n原车位置：$position\n本车是否在推荐车道：$status" +
++        return "车道级引导（从左向右编号）\n高德推荐：$recommendation\nC3摄像头位置：$cameraText\n原车位置：$position\n本车是否在推荐车道：$status" +
+             if (presentation?.currentLaneStatus == null) decisionText(oem)?.let { "\n$it" }.orEmpty() else ""
+     }
+ 
+@@ -59,6 +61,11 @@ object LaneGuidancePresenter {
+             lanesObservedAtMs = state.guidanceObservedAtMs) else state
+     }
+ 
++    private fun cameraFor(state: NavigationState, oem: OemVehicleLaneState) =
++        oem.cameraLanePosition?.let {
++            if (it.routeRevision == state.routeRevision) it else it.copy(valid = false, laneIndex = null)
++        }
++
+     private fun presentDisplay(state: NavigationState, oem: OemVehicleLaneState,
+                                nowWallMs: Long?): LaneGuidancePresentation? {
+         if (state.navigationMode !in setOf(NavigationMode.REALTIME, NavigationMode.SIMULATION)) return null
+@@ -129,11 +136,16 @@ object LaneGuidancePresenter {
+             LaneRecommendationSide.MIXED -> "高德变道引导 · 推荐车道已标绿"
+             LaneRecommendationSide.NONE -> "高德车道引导"
+         }
++        val camera = cameraFor(state, oem)
++        val positionUsable = camera?.valid ?: oem.positionValid
++        val countMatches = camera?.laneCount?.let { it == lanes.size } ?: true
+         val comparisonReady = state.navigationMode == NavigationMode.REALTIME &&
+             laneRouteConfirmed && state.routeMatched == true && !state.routeRecalculating &&
+-            oem.positionValid && state.lanes.size == lanes.size &&
++            positionUsable && countMatches && state.lanes.size == lanes.size &&
+             lanes.indices.all { lanes[it].index == it }
+-        val possibleIndices = if (comparisonReady) when (oem.position) {
++        val possibleIndices = if (comparisonReady && camera != null) {
++            listOfNotNull(camera.laneIndex?.minus(1)?.takeIf { it in lanes.indices })
++        } else if (comparisonReady) when (oem.position) {
+             OemLanePosition.LEFTMOST -> listOf(0)
+             OemLanePosition.RIGHTMOST -> listOf(lanes.lastIndex)
+             OemLanePosition.SINGLE -> if (lanes.size == 1) listOf(0) else emptyList()
+@@ -144,20 +156,22 @@ object LaneGuidancePresenter {
+             state.navigationMode != NavigationMode.REALTIME -> "模拟导航 · 无法判定本车车道"
+             !laneRouteConfirmed || state.routeMatched != true || state.routeRecalculating ->
+                 "路线与车道提示未对齐 · 无法判定本车车道"
+-            !oem.positionValid -> "原车车道位置未知 · 无法判定"
++            camera != null && !camera.valid -> "摄像头车道位置未知 · 无法判定"
++            !countMatches -> "摄像头与高德车道数不一致 · 无法判定"
++            !positionUsable -> "原车车道位置未知 · 无法判定"
+             lanes.none(LaneState::recommended) -> "高德未推荐车道 · 无法判定"
+             state.lanes.size != lanes.size || lanes.indices.any { lanes[it].index != it } ->
+                 "高德车道编号不完整 · 无法判定"
+             else -> when {
+                 possibleIndices.isEmpty() -> "原车位置与高德车道数无法对应 · 无法判定"
+-                possibleIndices.all { lanes[it].recommended } -> "原车报告：在推荐车道"
+-                possibleIndices.none { lanes[it].recommended } -> "原车报告：不在推荐车道"
++                possibleIndices.all { lanes[it].recommended } -> if (camera != null) "摄像头估计：在推荐车道" else "原车报告：在推荐车道"
++                possibleIndices.none { lanes[it].recommended } -> if (camera != null) "摄像头估计：不在推荐车道" else "原车报告：不在推荐车道"
+                 else -> "原车只报告中间车道 · 无法区分具体车道"
+             }
+         }
+         val currentIndex = possibleIndices.singleOrNull()
+         return LaneGuidancePresentation(
+-            title = title,
++            title = camera?.let { "C3摄像头位置：${it.label()} · $title" } ?: title,
+             items = lanes.map { lane ->
+                 LaneGuidanceItem(
+                     index = lane.index,
+diff --git a/app/src/test/kotlin/com/garan/tesnav/export/CameraLanePositionParserTest.kt b/app/src/test/kotlin/com/garan/tesnav/export/CameraLanePositionParserTest.kt
+new file mode 100644
+index 0000000..4c565f1
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/export/CameraLanePositionParserTest.kt
+@@ -0,0 +1,43 @@
++package com.garan.tesnav.export
++
++import org.junit.Assert.*
++import org.junit.Test
++
++class CameraLanePositionParserTest {
++    private fun parse(position: String, age: Long = 0L) = NavAssistV3AckParser.parse(
++        """{"messageType":"navassist_udp_ack","schemaVersion":3,"sessionId":"s","sequence":1,"lanePosition":$position}""".encodeToByteArray(),
++        "10.0.0.2", "s", 1, 10_000, 1_000, age,
++    )
++    private val good = """{"version":1,"valid":true,"laneIndex":2,"laneCount":4,"numbering":"leftToRight","source":"commaCamera","ageMs":300,"validForMs":2000,"routeRevision":2}"""
++
++    @Test fun `explicit road number is independent from OEM permissions`() {
++        val state = parse(good)!!.vehicleLane!!
++        assertEquals(2, state.cameraLanePosition!!.laneIndex)
++        assertEquals(4, state.cameraLanePosition!!.laneCount)
++        assertFalse(state.positionValid)
++        assertFalse(state.permissionValid)
++    }
++    @Test fun `expired and malformed position never becomes a lane number`() {
++        assertFalse(parse(good, 1_800)!!.vehicleLane!!.cameraLanePosition!!.valid)
++        assertFalse(parse(good)!!.vehicleLane!!.forDisplay(2_700, 3_000).cameraLanePosition!!.valid)
++        for (bad in listOf(good.replace("\"laneIndex\":2", "\"laneIndex\":5"),
++            good.replace("\"laneIndex\":2", "\"laneIndex\":true"),
++            good.replace("leftToRight", "rightToLeft"), good.replace("commaCamera", "visibleCorridor"))) {
++            assertNull(parse(bad)!!.vehicleLane?.cameraLanePosition)
++        }
++        val unknown = good.replace("\"valid\":true", "\"valid\":false").replace("\"laneIndex\":2", "\"laneIndex\":null")
++        assertFalse(parse(unknown)!!.vehicleLane!!.cameraLanePosition!!.valid)
++        assertEquals("未知", parse(unknown)!!.vehicleLane!!.cameraLanePosition!!.label())
++    }
++    @Test fun `reordered optional replies preserve independent OEM permissions`() {
++        val numbered = parse(good)!!
++        val oem = NavAssistV3UdpAck("10.0.0.2", com.garan.tesnav.model.OemVehicleLaneState(
++            positionValid = true, permissionValid = true, leftAllowed = true))
++        for (merged in listOf(mergeCameraReply(oem, numbered), mergeCameraReply(numbered, oem))) {
++            assertEquals(2, merged.vehicleLane!!.cameraLanePosition!!.laneIndex)
++            assertTrue(merged.vehicleLane!!.permissionValid)
++            assertTrue(merged.vehicleLane!!.leftAllowed)
++        }
++    }
++
++}
+diff --git a/app/src/test/kotlin/com/garan/tesnav/model/OemVehicleLaneStateTest.kt b/app/src/test/kotlin/com/garan/tesnav/model/OemVehicleLaneStateTest.kt
+index 51d3380..48c2457 100644
+--- a/app/src/test/kotlin/com/garan/tesnav/model/OemVehicleLaneStateTest.kt
++++ b/app/src/test/kotlin/com/garan/tesnav/model/OemVehicleLaneStateTest.kt
+@@ -59,6 +59,28 @@ class OemVehicleLaneStateTest {
+         assertFalse(presentation.title.contains("原车报告左侧许可"))
+     }
+ 
++    @Test fun `camera expires independently while OEM permission stays fresh`() = runBlocking {
++        val now = AtomicLong(1_000L)
++        val original = feedback().copy(cameraLanePosition = CameraLanePosition(
++            true, 2, 4, 0, 20, 1_000, 2))
++        val source = MutableStateFlow(original)
++        val events = Channel<OemVehicleLaneState>(Channel.UNLIMITED)
++        val job = launch { source.withDisplayExpiry(80L, now::get).collect { events.send(it) } }
++        try {
++            assertTrue(withTimeout(2_000L) { events.receive() }.cameraLanePosition!!.valid)
++            now.set(1_020L)
++            val expired = withTimeout(2_000L) { events.receive() }
++            assertFalse(expired.cameraLanePosition!!.valid)
++            assertTrue(expired.permissionValid)
++            assertTrue(source.value.cameraLanePosition!!.valid)
++            now.set(1_080L)
++            assertFalse(withTimeout(2_000L) { events.receive() }.permissionValid)
++        } finally {
++            job.cancelAndJoin()
++            events.close()
++        }
++    }
++
+     @Test
+     fun `silent source expires without navigation updates or another ACK`() = runBlocking {
+         val now = AtomicLong(1_000L)
+diff --git a/app/src/test/kotlin/com/garan/tesnav/ui/LaneGuidancePresenterTest.kt b/app/src/test/kotlin/com/garan/tesnav/ui/LaneGuidancePresenterTest.kt
+index 0d56af1..386f97e 100644
+--- a/app/src/test/kotlin/com/garan/tesnav/ui/LaneGuidancePresenterTest.kt
++++ b/app/src/test/kotlin/com/garan/tesnav/ui/LaneGuidancePresenterTest.kt
+@@ -333,6 +333,25 @@ class LaneGuidancePresenterTest {
+             .contains("路线与车道提示未对齐 · 无法判定"))
+     }
+ 
++    @Test fun `camera number selects exact middle lane and expires to unknown`() {
++        val state = NavigationState(navigationMode = NavigationMode.REALTIME,
++            navAssistSourceStatus = "healthy", routeMatched = true, routeRevision = 2,
++            unkeyedRouteFactsConfirmed = true,
++            lanes = (0..3).map { lane(it, it == 1, LaneAction.STRAIGHT) })
++        val camera = com.garan.tesnav.model.CameraLanePosition(true, 2, 4, 0, 2_000, 1_000, 2)
++        val feedback = OemVehicleLaneState(receivedAtMs = 1, receivedAtElapsedMs = 1_000,
++            cameraLanePosition = camera)
++        val result = LaneGuidancePresenter.present(state, feedback)!!
++        assertEquals(listOf(1), result.items.filter { it.current }.map { it.index })
++        assertTrue(result.currentLaneStatus!!.contains("摄像头估计：在推荐车道"))
++        assertTrue(LaneGuidancePresenter.observationText(state, feedback).contains("第 2／4 车道"))
++        for (invalid in listOf(feedback.forDisplay(3_001, 5_000),
++            feedback.copy(cameraLanePosition = camera.copy(routeRevision = 1)),
++            feedback.copy(cameraLanePosition = camera.copy(laneCount = 3)))) {
++            assertTrue(LaneGuidancePresenter.present(state, invalid)!!.items.none { it.current })
++        }
++    }
++
+     private fun lane(index: Int, recommended: Boolean, vararg actions: LaneAction) = LaneState(
+         index = index,
+         allowedActions = actions.toList(),
+-- 
+2.50.1 (Apple Git-155)
+

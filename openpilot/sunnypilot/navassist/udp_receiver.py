@@ -6,6 +6,8 @@ import socket
 import threading
 import time
 
+from openpilot.sunnypilot.navassist.position_feedback import REQUEST_TYPE, lane_position_feedback
+
 from openpilot.sunnypilot.navassist.protocol import NavAssistProtocolError, NavAssistStore
 from openpilot.sunnypilot.navassist.server import ClientRateLimiter
 
@@ -30,6 +32,7 @@ class NavAssistUDPServer:
 
   def __init__(self, address: tuple[str, int], store: NavAssistStore, *,
                rate_limiter: ClientRateLimiter | None = None):
+    self._accepted_source = None
     self.store = store
     self.rate_limiter = rate_limiter or ClientRateLimiter()
     self._stopping = threading.Event()
@@ -75,11 +78,31 @@ class NavAssistUDPServer:
       if not self.rate_limiter.allow(source_host):
         self._reject_record('rateLimited')
         continue
+      # Separate opt-in query preserves canonical snapshots and old ACK clients.
+      try:
+        query = json.loads(body)
+      except (ValueError, UnicodeDecodeError):
+        query = None
+      if isinstance(query, dict) and query.get('messageType') == REQUEST_TYPE:
+        current = self.store.current()
+        if (len(body) <= 512 and set(query) == {'messageType', 'sessionId', 'sequence'} and
+            current is not None and not self.store.is_stale() and self._accepted_source == source_host and
+            query['sessionId'] == current.snapshot.session_id and
+            type(query['sequence']) is int and query['sequence'] == current.snapshot.sequence):
+          ack = {'messageType': UDP_ACK_TYPE, 'schemaVersion': 3,
+                 'sessionId': current.snapshot.session_id, 'sequence': current.snapshot.sequence,
+                 'lanePosition': lane_position_feedback(current.snapshot)}
+          try:
+            self._socket.sendto(json.dumps(ack, allow_nan=False, separators=(',', ':')).encode(), address)
+          except OSError:
+            pass
+        continue
       try:
         accepted = self.store.accept(body, source_key_id(source_host))
       except NavAssistProtocolError as error:
         self._reject_record(error.reason)
         continue
+      self._accepted_source = source_host
       with self._stats_lock:
         self._stats['accepted'] += 1
       acknowledgement = json.dumps({
