@@ -91,6 +91,65 @@ def request_result(config: dict, frame: dict, image: bytes | dict, *, session=No
       client.close()
 
 
+
+STATUS_PATH = RESULT_PATH.with_name('external_lane_status.json')
+
+
+def resolve_endpoint(config: dict, previous: str | None = None) -> str | None:
+  if not config.get('discovery'):
+    return config['url']
+  # Reauthenticate the last discovered address before relying on lossy broadcasts.
+  if previous:
+    endpoint = discover(config['token'], target=urlparse(previous).hostname)
+    if endpoint:
+      return endpoint
+  endpoint = discover(config['token'])
+  if endpoint:
+    return endpoint
+  configured = urlparse(config['url']).hostname
+  if not previous or configured != urlparse(previous).hostname:
+    return discover(config['token'], target=configured)
+  return None
+
+
+def failure_reason(error: Exception) -> str:
+  # Do not persist arbitrary exception text: requests errors can contain URLs.
+  known = {'paired host not found', 'wide camera unavailable', 'camera frame is stale',
+           'expired frame', 'response does not match outstanding frame',
+           'missing calibrated ego point', 'invalid NV12 frame', 'truncated NV12 frame',
+           'host returned 400', 'host returned 401', 'host returned 429', 'host returned 503'}
+  text = str(error)
+  return text if text in known else type(error).__name__
+
+
+def write_status(state: str, *, reason: str, stable: int = 0, total_ms: float = 0.0):
+  from openpilot.sunnypilot.navassist.settings import atomic_json
+  atomic_json(STATUS_PATH, {'version': 1, 'updated_mono_ns': time.monotonic_ns(),
+                           'state': state, 'reason': reason, 'stable_samples': stable,
+                           'total_ms': round(total_ms, 2)})
+
+
+class StableObservation:
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.key = None
+    self.count = 0
+
+  def update(self, result: dict) -> dict:
+    if not result['valid']:
+      self.reset()
+      return result
+    key = (result['visible_lane_count'], result['ego_lane_index'])
+    self.count = self.count + 1 if key == self.key else 1
+    self.key = key
+    if self.count < 3:
+      return result | dict(valid=False, visible_lane_count=0, ego_lane_index=-1,
+                           score=0, reason='stabilizing')
+    return result
+
+
 def calibrated_ego_point(sm) -> list[float] | None:
   from openpilot.cereal import log
   from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
@@ -140,7 +199,7 @@ def main():
   client = VisionIpcClient('camerad', VisionStreamType.VISION_STREAM_WIDE_ROAD, conflate=True)
   sm = messaging.SubMaster(['extrinsicsCalibration', 'deviceState', 'wideRoadCameraState', 'modelV2'])
   session_id, sequence = uuid.uuid4().hex, 0
-  last_index, stable = None, 0
+  stability = StableObservation()
   connected = False
   endpoint = None
   params = Params()
@@ -152,6 +211,7 @@ def main():
         if not connected:
           connected = client.connect(False)
           if not connected:
+            write_status('waiting', reason='wide camera unavailable')
             time.sleep(1)
             continue
         sm.update(0)
@@ -161,10 +221,18 @@ def main():
         primary = sm['modelV2']
         if (params.get_bool('IsOffroad') or ego is None or not healthy or
             not primary_has_budget(primary)):
-          last_index, stable = None, 0
+          stability.reset()
           RESULT_PATH.unlink(missing_ok=True)
+          reason = ('offroad' if params.get_bool('IsOffroad') else 'calibration unavailable' if ego is None
+                    else 'primary unavailable' if not healthy else 'primary over budget')
+          write_status('waiting', reason=reason)
           time.sleep(0.5)
           continue
+        # Discover before receiving a fresh frame, so network lookup cannot age it.
+        resolved = resolve_endpoint(config, endpoint)
+        if resolved is None:
+          raise ValueError('paired host not found')
+        endpoint = resolved
         camera = client.recv(timeout_ms=100)
         if camera is None:
           connected = False
@@ -177,24 +245,17 @@ def main():
         frame = {'version': 1, 'session': session_id, 'sequence': sequence,
                  'frame_id': int(client.frame_id), 'capture_mono_ns': captured,
                  'ego_point': ego, 'camera': 'wideRoad'}
-        if config.get('discovery'):
-          endpoint = discover(config['token']) or discover(config['token'], target=urlparse(config['url']).hostname)
-          if endpoint is None:
-            raise ValueError('paired host not found')
-        else:
-          endpoint = config['url']
         result = request_result(config | {'url': endpoint}, frame, export_nv12(camera), session=http)
-        key = (result['visible_lane_count'], result['ego_lane_index']) if result['valid'] else None
-        stable = stable + 1 if key is not None and key == last_index else 1
-        last_index = key
-        if stable < 3 or key is None:
-          result.update(valid=False, visible_lane_count=0, ego_lane_index=-1, score=0, reason='stabilizing')
+        result = stability.update(result)
         atomic_json(RESULT_PATH, result)
+        write_status('valid' if result['valid'] else 'waiting', reason=result['reason'],
+                     stable=stability.count, total_ms=(time.monotonic()-started)*1000)
       except (ValueError, OSError, requests.RequestException ) as error:
-        endpoint = None
-        last_index, stable = None, 0
+        stability.reset()
         RESULT_PATH.unlink(missing_ok=True)
-        cloudlog.warning('external lane observation unavailable: %s', type(error).__name__)
+        reason = failure_reason(error)
+        write_status('error', reason=reason, total_ms=(time.monotonic()-started)*1000)
+        cloudlog.warning('external lane observation unavailable: %s', reason)
       # At most one frame per second, with no background queue or retry backlog.
       time.sleep(max(0.05, 1.0 - (time.monotonic() - started)))
 

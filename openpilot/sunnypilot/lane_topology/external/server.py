@@ -31,6 +31,7 @@ class LaneServer(ThreadingHTTPServer):
     self.model_lock = threading.Lock()
     self.last_result = None
     self.count = 0
+    self.last_completed = None
     self.started = time.monotonic()
     super().__init__(address, Handler)
     self.timeout = 1
@@ -70,6 +71,17 @@ class Handler(BaseHTTPRequestHandler):
     self.wfile.write(body)
 
   def do_GET(self):
+    if self.path == '/diagnostics':
+      if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + self.server.token):
+        self.respond(401, {'error': 'unauthorized'})
+        return
+      result = self.server.last_result or {}
+      keys = ('valid', 'reason', 'visible_lane_count', 'ego_lane_index', 'inference_ms', 'absolute_confirmed')
+      self.respond(200, {'frames': self.server.count,
+                         'last_result': {k: result[k] for k in keys if k in result},
+                         'last_result_age_s': (time.monotonic()-self.server.last_completed
+                                               if self.server.last_completed is not None else None)})
+      return
     if self.path != '/health':
       self.respond(404, {'error': 'notFound'})
       return
@@ -122,6 +134,7 @@ class Handler(BaseHTTPRequestHandler):
         raise ValueError('missing image payload')
       result = self.server.model.infer(image, value)
       self.server.last_result = result
+      self.server.last_completed = time.monotonic()
       self.server.count += 1
       self.respond(200, result)
     except (ValueError, TypeError, KeyError, OSError, zlib.error):

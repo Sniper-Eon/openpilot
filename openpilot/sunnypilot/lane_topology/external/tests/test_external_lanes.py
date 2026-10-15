@@ -250,3 +250,64 @@ def test_compressed_frame_roundtrip_and_decompression_limit(server):
   payload['nv12_zlib']=base64.b64encode(zlib.compress(bytes(1_000_000))).decode()
   response=requests.post(config['url']+'/infer',json=frame()|payload,headers={'Authorization':'Bearer '+config['token']},timeout=2)
   assert response.status_code==400 and s.count==1
+
+
+def test_invalid_perception_preserves_reason_and_breaks_stability():
+  from openpilot.sunnypilot.lane_topology.external.sender import StableObservation
+  gate = StableObservation()
+  good = observation(frame(), lines(), 20)
+  assert gate.update(good)['reason'] == 'stabilizing'
+  assert gate.update(good)['reason'] == 'stabilizing'
+  invalid = observation(frame(), [], 20)
+  assert gate.update(invalid)['reason'] == 'ambiguous'
+  assert gate.count == 0
+  assert not gate.update(good)['valid']
+  assert not gate.update(good)['valid']
+  assert gate.update(good)['valid']
+  changed = good | {'ego_lane_index': 2}
+  assert not gate.update(changed)['valid']
+  gate.reset()
+  assert not gate.update(good)['valid']
+
+
+def test_discovery_reauthenticates_previous_address_before_broadcast(monkeypatch):
+  from openpilot.sunnypilot.lane_topology.external import sender
+  calls = []
+  def lookup(token, *, target=None):
+    calls.append(target)
+    return 'http://10.1.2.3:7788' if target == '10.1.2.3' else None
+  monkeypatch.setattr(sender, 'discover', lookup)
+  config = {'url': 'http://192.168.5.107:7788', 'token': 't'*64, 'discovery': True}
+  assert sender.resolve_endpoint(config, 'http://10.1.2.3:7788') == 'http://10.1.2.3:7788'
+  assert calls == ['10.1.2.3']
+
+
+def test_discovery_never_reuses_previous_address_without_fresh_proof(monkeypatch):
+  from openpilot.sunnypilot.lane_topology.external import sender
+  monkeypatch.setattr(sender, 'discover', lambda *a, **kw: None)
+  config = {'url': 'http://192.168.5.107:7788', 'token': 't'*64, 'discovery': True}
+  assert sender.resolve_endpoint(config, 'http://10.1.2.3:7788') is None
+
+
+def test_host_diagnostics_require_token_and_omit_frame_details(server):
+  s, m, config = server
+  assert requests.get(config['url']+'/diagnostics', timeout=2).status_code == 401
+  headers = {'Authorization': 'Bearer '+config['token']}
+  before = requests.get(config['url']+'/diagnostics', headers=headers, timeout=2).json()
+  assert before['last_result_age_s'] is None and before['last_result'] == {}
+  request_result(config, frame(), jpeg())
+  data = requests.get(config['url']+'/diagnostics', headers=headers, timeout=2).json()
+  assert data['frames'] == 1 and data['last_result']['valid']
+  assert data['last_result_age_s'] >= 0
+  assert not {'boundaries','ego_point','session','capture_mono_ns'} & set(data['last_result'])
+
+
+def test_observer_diagnostics_do_not_store_private_exception_strings(tmp_path, monkeypatch):
+  from openpilot.sunnypilot.lane_topology.external import sender
+  assert sender.failure_reason(ValueError('expired frame')) == 'expired frame'
+  assert sender.failure_reason(requests.ConnectionError('secret-token private-url')) == 'ConnectionError'
+  assert sender.failure_reason(ValueError('secret-token')) == 'ValueError'
+  monkeypatch.setattr(sender, 'STATUS_PATH', tmp_path/'status.json')
+  sender.write_status('waiting', reason='ambiguous', stable=0)
+  status = json.loads((tmp_path/'status.json').read_text())
+  assert status['reason'] == 'ambiguous' and status['updated_mono_ns'] > 0
