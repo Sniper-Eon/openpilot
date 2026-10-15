@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import threading
 import time
+import zlib
 from types import SimpleNamespace
 
 import cv2
@@ -100,7 +101,7 @@ def test_nv12_stride_and_padding_are_not_interpreted_as_image_pixels():
   data[uv_offset:].reshape(h//2,stride)[:,:w] = 128
   f = SimpleNamespace(width=w,height=h,stride=stride,uv_offset=uv_offset,data=data)
   payload = export_nv12(f)
-  raw = np.frombuffer(base64.b64decode(payload['nv12']),np.uint8).reshape(h*3//2,w)
+  raw = np.frombuffer(zlib.decompress(base64.b64decode(payload['nv12_zlib'])),np.uint8).reshape(h*3//2,w)
   image = cv2.cvtColor(raw,cv2.COLOR_YUV2BGR_NV12)
   assert image.shape == (h,w,3)
   assert image.max()-image.min() <= 3
@@ -239,3 +240,13 @@ def test_linux_discovery_uses_directed_wifi_broadcast(monkeypatch):
     {'addr_info':[{'family':'inet','local':'127.0.0.1'}]},
     {'addr_info':[{'family':'inet','local':'192.168.5.182','broadcast':'192.168.5.255'}]}]))
   assert discovery.broadcast_targets() == ['192.168.5.255','255.255.255.255']
+
+
+def test_compressed_frame_roundtrip_and_decompression_limit(server):
+  s,m,config=server
+  raw=bytes([128])*(64*48*3//2)
+  payload={'nv12_zlib':base64.b64encode(zlib.compress(raw,1)).decode(),'width':64,'height':48}
+  assert request_result(config,frame(),payload)['valid']
+  payload['nv12_zlib']=base64.b64encode(zlib.compress(bytes(1_000_000))).decode()
+  response=requests.post(config['url']+'/infer',json=frame()|payload,headers={'Authorization':'Bearer '+config['token']},timeout=2)
+  assert response.status_code==400 and s.count==1

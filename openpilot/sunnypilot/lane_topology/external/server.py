@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import zlib
 
 import cv2
 import numpy as np
@@ -91,11 +92,19 @@ class Handler(BaseHTTPRequestHandler):
         raise ValueError('oversized request')
       value = json.loads(self.rfile.read(size))
       validate_frame(value)
-      if 'nv12' in value and 'jpeg' not in value:
+      if sum(key in value for key in ('nv12','nv12_zlib','jpeg')) != 1:
+        raise ValueError('ambiguous image format')
+      if 'nv12' in value or 'nv12_zlib' in value:
         w, h = value.get('width'), value.get('height')
         if type(w) is not int or type(h) is not int or not (32 <= w <= 640 and 32 <= h <= 480) or w%2 or h%2:
           raise ValueError('invalid raw frame dimensions')
-        raw = base64.b64decode(value['nv12'], validate=True)
+        compressed = 'nv12_zlib' in value
+        raw = base64.b64decode(value['nv12_zlib' if compressed else 'nv12'], validate=True)
+        if compressed:
+          decoder=zlib.decompressobj()
+          raw=decoder.decompress(raw,w*h*3//2+1)
+          if not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+            raise ValueError('compressed frame exceeds dimensions')
         if len(raw) != w*h*3//2:
           raise ValueError('truncated raw frame')
         image = cv2.cvtColor(np.frombuffer(raw,np.uint8).reshape(h*3//2,w),cv2.COLOR_YUV2BGR_NV12)
@@ -115,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
       self.server.last_result = result
       self.server.count += 1
       self.respond(200, result)
-    except (ValueError, TypeError, KeyError, OSError):
+    except (ValueError, TypeError, KeyError, OSError, zlib.error):
       self.respond(400, {'error': 'invalidFrame'})
     except Exception:
       self.respond(503, {'error': 'inferenceUnavailable'})

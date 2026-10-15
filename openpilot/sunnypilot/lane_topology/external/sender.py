@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 import time
 import uuid
+import zlib
 from urllib.parse import urlparse
 
 import numpy as np
@@ -61,13 +62,13 @@ def export_nv12(frame) -> dict:
   small_y = y[ys[:,None], xs[None,:]]
   small_uv = uv[(ys[::2]//2)[:,None], (xs[::2]//2)[None,:]]
   raw = small_y.tobytes() + small_uv.tobytes()
-  return {'nv12': base64.b64encode(raw).decode(), 'width': tw, 'height': th}
+  return {'nv12_zlib': base64.b64encode(zlib.compress(raw,1)).decode(), 'width': tw, 'height': th}
 
 
 def request_result(config: dict, frame: dict, image: bytes | dict, *, session=None, now_ns=None) -> dict:
   validate_frame(frame)
   payload = {'jpeg': base64.b64encode(image).decode()} if isinstance(image, bytes) else image
-  if not isinstance(payload, dict) or set(payload) not in ({'jpeg'}, {'nv12', 'width', 'height'}):
+  if not isinstance(payload, dict) or set(payload) not in ({'jpeg'}, {'nv12', 'width', 'height'}, {'nv12_zlib', 'width', 'height'}):
     raise ValueError('invalid image payload')
   client = session or requests.Session()
   if session is None:
@@ -76,7 +77,7 @@ def request_result(config: dict, frame: dict, image: bytes | dict, *, session=No
     with client.post(config['url'].rstrip('/') + '/infer',
                      json={**frame, **payload},
                      headers={'Authorization': 'Bearer ' + config['token']},
-                     timeout=(0.25, 1.0), allow_redirects=False, stream=True) as response:
+                     timeout=(1.0, 1.0), allow_redirects=False, stream=True) as response:
       if response.status_code != 200:
         raise ValueError(f'host returned {response.status_code}')
       data = bytearray()
