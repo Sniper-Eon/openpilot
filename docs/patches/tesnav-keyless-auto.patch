@@ -1,0 +1,2127 @@
+From aa2238a4f9414c20692a12df52765532db4a6d53 Mon Sep 17 00:00:00 2001
+From: DeepSeek <liangjiajian@liangjiajiandeMacBook-Air.local>
+Date: Thu, 15 Oct 2026 22:27:02 +0800
+Subject: [PATCH] Add a keyless car-machine broadcast forwarding entry
+
+The extended build forced every start through AmapConfiguration.prepare, so a
+phone without an AMap Key could not use the car-machine navigation broadcast at
+all. This adds an independent entry that needs no Key: it reuses the existing
+Amap Auto broadcast parser, NavigationSourceGate, Android LocationManager and the
+NavAssist v3 UDP exporter, and never instantiates MapView, AMapNavi,
+NavigationRepository or the SDK coordinate converter.
+
+The exported session declares wgs84 because its only position source is Android
+GPS. Every broadcast GCJ02 position field is removed before parsing, so a
+broadcast fix can never be labelled as, or blended with, a WGS84 observation. A
+fix keeps its receiver measurement time, so repeated exporter ticks cannot renew
+a stale position, and mock, low-accuracy and out-of-range fixes are refused.
+
+MainActivity now decides the startup route before any SDK initialization and
+sends a keyless extended build to the new entry; AmapKeyActivity offers it too.
+The embedded map still requires a Key. Stopping releases location, broadcast and
+the exporter, and a restart builds a new session and exporter.
+
+Assisted-by: DeepSeek
+---
+ app/src/main/AndroidManifest.xml              |   9 +
+ .../com/garan/tesnav/AmapKeyActivity.kt       |   8 +
+ .../com/garan/tesnav/KeylessAutoActivity.kt   | 269 +++++++++++
+ .../com/garan/tesnav/KeylessAutoEntry.kt      |  19 +
+ .../kotlin/com/garan/tesnav/MainActivity.kt   |  14 +-
+ .../tesnav/export/NavAssistV2Protocol.kt      |  14 +-
+ .../tesnav/service/KeylessAutoDisplay.kt      | 158 ++++++
+ .../tesnav/service/KeylessAutoLocation.kt     | 111 +++++
+ .../tesnav/service/KeylessAutoService.kt      | 450 ++++++++++++++++++
+ .../garan/tesnav/service/KeylessAutoState.kt  | 107 +++++
+ .../com/garan/tesnav/KeylessAutoEntryTest.kt  |  84 ++++
+ .../export/NavAssistWgs84SessionTest.kt       | 191 ++++++++
+ .../tesnav/service/KeylessAutoLocationTest.kt | 111 +++++
+ .../service/KeylessAutoPresenterTest.kt       | 196 ++++++++
+ .../tesnav/service/KeylessAutoStateTest.kt    | 196 ++++++++
+ 15 files changed, 1934 insertions(+), 3 deletions(-)
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/KeylessAutoActivity.kt
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/KeylessAutoEntry.kt
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoDisplay.kt
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoLocation.kt
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoService.kt
+ create mode 100644 app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoState.kt
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/KeylessAutoEntryTest.kt
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/export/NavAssistWgs84SessionTest.kt
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoLocationTest.kt
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoPresenterTest.kt
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoStateTest.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index c50bbc5..dfe37a1 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -48,6 +48,15 @@
+             android:name=".NavigationActivity"
+             android:exported="false" />
+ 
++        <activity
++            android:name=".KeylessAutoActivity"
++            android:exported="false" />
++
++        <service
++            android:name=".service.KeylessAutoService"
++            android:exported="false"
++            android:foregroundServiceType="location" />
++
+         <service
+             android:name=".service.NavigationForegroundService"
+             android:exported="false"
+diff --git a/app/src/main/kotlin/com/garan/tesnav/AmapKeyActivity.kt b/app/src/main/kotlin/com/garan/tesnav/AmapKeyActivity.kt
+index 0e15cba..2b0aeb6 100644
+--- a/app/src/main/kotlin/com/garan/tesnav/AmapKeyActivity.kt
++++ b/app/src/main/kotlin/com/garan/tesnav/AmapKeyActivity.kt
+@@ -39,6 +39,14 @@ class AmapKeyActivity : Activity() {
+             body.addView(Button(this).apply { text = value; setOnClickListener { action() } })
+         }
+         body.addView(label("连接高德导航", 28f).apply { setTypeface(typeface, Typeface.BOLD) })
++        if (BuildConfig.EXTENDED_NAV_SOURCES) {
++            body.addView(label("没有高德 Key 也可以只转发高德车机广播导航：该入口使用车机的导航广播与手机定位，不初始化地图 / 导航 SDK，也不需要 Key。", 15f))
++            button("使用车机转发（免 Key）") {
++                startActivity(Intent(this, KeylessAutoActivity::class.java)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
++                finish()
++            }
++        }
+         body.addView(label(if (existing == null) "首次使用，请先填写高德 Android Key。配置保存在本机，之后无需重复填写。"
+                           else "高德 Key 已配置。你可以在这里查看申请说明或更换 Key。"))
+         val input = EditText(this).apply {
+diff --git a/app/src/main/kotlin/com/garan/tesnav/KeylessAutoActivity.kt b/app/src/main/kotlin/com/garan/tesnav/KeylessAutoActivity.kt
+new file mode 100644
+index 0000000..5df2cae
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/KeylessAutoActivity.kt
+@@ -0,0 +1,269 @@
++package com.garan.tesnav
++
++import android.Manifest
++import android.app.Activity
++import android.content.ComponentName
++import android.content.Context
++import android.content.Intent
++import android.content.ServiceConnection
++import android.content.pm.PackageManager
++import android.graphics.Color
++import android.graphics.Typeface
++import android.os.Build
++import android.os.Bundle
++import android.os.IBinder
++import android.view.Gravity
++import android.view.View
++import android.view.ViewGroup
++import android.widget.Button
++import android.widget.LinearLayout
++import android.widget.ScrollView
++import android.widget.TextView
++import android.widget.Toast
++import com.garan.tesnav.service.KeylessAutoService
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.launch
++
++/**
++ * Keyless car-machine broadcast entry.
++ *
++ * It only uses Android widgets, [android.location.LocationManager], the existing
++ * broadcast parser and the existing UDP exporter. No AMap map, navigation or
++ * coordinate SDK is instantiated, so it works without an AMap Key.
++ */
++class KeylessAutoActivity : Activity() {
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
++    private var service: KeylessAutoService? = null
++    private var bound = false
++    private var displayJob: Job? = null
++
++    private lateinit var headlineText: TextView
++    private lateinit var broadcastText: TextView
++    private lateinit var locationText: TextView
++    private lateinit var c3Text: TextView
++    private lateinit var cameraLaneText: TextView
++    private lateinit var navigationText: TextView
++    private lateinit var linkText: TextView
++    private lateinit var startButton: Button
++    private lateinit var stopButton: Button
++
++    private val connection = object : ServiceConnection {
++        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
++            val connected = (binder as? KeylessAutoService.LocalBinder)?.getService() ?: return
++            service = connected
++            observe(connected)
++        }
++
++        override fun onServiceDisconnected(name: ComponentName?) {
++            displayJob?.cancel()
++            displayJob = null
++            service = null
++            bound = false
++            refreshButtons()
++        }
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        headlineText = detail(22f, Color.rgb(15, 76, 92)).apply { setTypeface(typeface, Typeface.BOLD) }
++        broadcastText = detail(15f, Color.rgb(30, 41, 59))
++        locationText = detail(15f, Color.rgb(30, 41, 59))
++        c3Text = detail(15f, Color.rgb(30, 41, 59))
++        cameraLaneText = detail(17f, Color.rgb(0, 105, 92)).apply { setTypeface(typeface, Typeface.BOLD) }
++        navigationText = detail(15f, Color.rgb(30, 41, 59))
++        linkText = detail(13f, Color.rgb(84, 110, 122))
++        startButton = actionButton("启动转发") { startForwarding() }
++        stopButton = actionButton("停止转发") { stopForwarding() }
++        setContentView(createRootView())
++        refreshButtons()
++    }
++
++    private fun createRootView(): ScrollView {
++        val body = LinearLayout(this).apply {
++            orientation = LinearLayout.VERTICAL
++            setPadding(dp(24), dp(32), dp(24), dp(32))
++            setBackgroundColor(Color.rgb(246, 248, 252))
++        }
++        fun heading(value: String) = TextView(this).apply {
++            text = value
++            textSize = 28f
++            setTextColor(Color.rgb(15, 23, 42))
++            setTypeface(typeface, Typeface.BOLD)
++            setPadding(0, 0, 0, dp(8))
++        }
++        fun paragraph(value: String) = TextView(this).apply {
++            text = value
++            textSize = 14f
++            setTextColor(Color.rgb(51, 65, 85))
++            setLineSpacing(dp(3).toFloat(), 1.1f)
++            setPadding(0, dp(6), 0, dp(6))
++        }
++        body.addView(heading("车机广播转发（免高德 Key）"))
++        body.addView(paragraph("只使用 Android 定位、高德车机广播和 C3 UDP 回执，不初始化高德地图 / 导航 SDK，因此不需要高德 Key。"))
++        body.addView(headlineText)
++        body.addView(broadcastText)
++        body.addView(locationText)
++        body.addView(c3Text)
++        body.addView(cameraLaneText)
++        body.addView(navigationText)
++        body.addView(linkText)
++        body.addView(LinearLayout(this).apply {
++            orientation = LinearLayout.HORIZONTAL
++            gravity = Gravity.CENTER_VERTICAL
++            addView(startButton, LinearLayout.LayoutParams(0, dp(52), 1f))
++            addView(stopButton, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(10) })
++        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
++            topMargin = dp(12)
++        })
++        body.addView(paragraph(
++            "说明：\n" +
++                "· 摄像头车道编号为只读显示；不确定、遮挡或过期时显示“未知”，不参与转向、变道或任何车辆控制。\n" +
++                "· 请勿同时开启内置地图入口与本入口的转发，同一导航会话只能有一个发送端。\n" +
++                "· 定位使用手机 GPS 原始 WGS84 坐标并保留测量时间，不会用刷新时间戳续期。\n" +
++                "· 停止会关闭定位、广播接收与 C3 发送；再次启动会创建新的会话。",
++        ))
++        body.addView(Button(this).apply {
++            text = "返回设置"
++            setOnClickListener { finish() }
++        })
++        return ScrollView(this).apply { isFillViewport = true; addView(body) }
++    }
++
++    private fun observe(service: KeylessAutoService) {
++        displayJob?.cancel()
++        displayJob = scope.launch {
++            service.display.collect { display ->
++                headlineText.text = display.headline
++                broadcastText.text = display.broadcast
++                locationText.text = display.location
++                c3Text.text = display.c3
++                cameraLaneText.text = display.cameraLane
++                navigationText.text = display.navigation
++                linkText.text = display.link
++                refreshButtons()
++            }
++        }
++    }
++
++    private fun startForwarding() {
++        if (!hasLocationPermission()) {
++            requestPermissions(LOCATION_PERMISSIONS, LOCATION_PERMISSION_REQUEST)
++            return
++        }
++        requestNotificationPermission()
++        startAndBind()
++    }
++
++    private fun startAndBind() {
++        KeylessAutoService.start(this)
++        bindToService()
++        refreshButtons()
++        toast("已启动车机广播转发")
++    }
++
++    private fun stopForwarding() {
++        stopService(Intent(this, KeylessAutoService::class.java))
++        displayJob?.cancel()
++        displayJob = null
++        if (bound) {
++            runCatching { unbindService(connection) }
++            bound = false
++        }
++        service = null
++        headlineText.text = "已停止"
++        refreshButtons()
++    }
++
++    private fun bindToService() {
++        if (bound) return
++        bound = runCatching {
++            bindService(Intent(this, KeylessAutoService::class.java), connection, Context.BIND_AUTO_CREATE)
++        }.getOrDefault(false)
++    }
++
++    private fun refreshButtons() {
++        if (!::startButton.isInitialized) return
++        val running = service != null || KeylessAutoService.instanceAlive
++        startButton.isEnabled = !running
++        stopButton.isEnabled = running
++    }
++
++    private fun hasLocationPermission(): Boolean =
++        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
++            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
++
++    private fun requestNotificationPermission() {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
++            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
++        ) {
++            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
++        }
++    }
++
++    override fun onRequestPermissionsResult(
++        requestCode: Int,
++        permissions: Array<out String>,
++        grantResults: IntArray,
++    ) {
++        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
++        when (requestCode) {
++            LOCATION_PERMISSION_REQUEST -> if (hasLocationPermission()) {
++                startForwarding()
++            } else {
++                toast("缺少定位权限，无法转发车机导航")
++            }
++            NOTIFICATION_PERMISSION_REQUEST -> Unit
++        }
++    }
++
++    override fun onStart() {
++        super.onStart()
++        if (KeylessAutoService.instanceAlive) bindToService()
++        refreshButtons()
++    }
++
++    override fun onStop() {
++        if (bound) {
++            runCatching { unbindService(connection) }
++            bound = false
++        }
++        super.onStop()
++    }
++
++    override fun onDestroy() {
++        displayJob?.cancel()
++        scope.cancel()
++        super.onDestroy()
++    }
++
++    private fun detail(size: Float, color: Int): TextView = TextView(this).apply {
++        textSize = size
++        setTextColor(color)
++        setPadding(0, dp(6), 0, dp(6))
++        setLineSpacing(dp(2).toFloat(), 1.1f)
++    }
++
++    private fun actionButton(label: String, action: () -> Unit): Button = Button(this).apply {
++        text = label
++        textSize = 17f
++        setTextColor(Color.WHITE)
++        backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(0, 120, 255))
++        setOnClickListener { action() }
++    }
++
++    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
++    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
++
++    private companion object {
++        const val LOCATION_PERMISSION_REQUEST = 11
++        const val NOTIFICATION_PERMISSION_REQUEST = 12
++        val LOCATION_PERMISSIONS = arrayOf(
++            Manifest.permission.ACCESS_FINE_LOCATION,
++            Manifest.permission.ACCESS_COARSE_LOCATION,
++        )
++    }
++}
+diff --git a/app/src/main/kotlin/com/garan/tesnav/KeylessAutoEntry.kt b/app/src/main/kotlin/com/garan/tesnav/KeylessAutoEntry.kt
+new file mode 100644
+index 0000000..c5bc0b0
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/KeylessAutoEntry.kt
+@@ -0,0 +1,19 @@
++package com.garan.tesnav
++
++/** Where startup sends the user before any AMap SDK is initialized. */
++internal enum class StartupRoute { EMBEDDED_MAP, KEYLESS_AUTO, AMAP_KEY }
++
++/**
++ * Startup routing for a build with extended navigation sources.
++ *
++ * A missing AMap Key must not be resolved by initializing the SDK with a blank
++ * key, and the keyless car-machine broadcast entry needs no key at all. Plain
++ * builds without extended sources keep the original key-required behaviour.
++ */
++internal object KeylessAutoEntry {
++    fun route(hasAmapKey: Boolean, extendedNavSources: Boolean): StartupRoute = when {
++        hasAmapKey -> StartupRoute.EMBEDDED_MAP
++        extendedNavSources -> StartupRoute.KEYLESS_AUTO
++        else -> StartupRoute.AMAP_KEY
++    }
++}
+diff --git a/app/src/main/kotlin/com/garan/tesnav/MainActivity.kt b/app/src/main/kotlin/com/garan/tesnav/MainActivity.kt
+index 023d714..8e7a790 100644
+--- a/app/src/main/kotlin/com/garan/tesnav/MainActivity.kt
++++ b/app/src/main/kotlin/com/garan/tesnav/MainActivity.kt
+@@ -149,7 +149,19 @@ class MainActivity : Activity(), AddressLookupView {
+         autoLandscapePageOpened = savedInstanceState?.getBoolean("autoLandscapePageOpened") == true &&
+             resources.configuration.screenWidthDp >= 600 &&
+             resources.configuration.screenWidthDp > resources.configuration.screenHeightDp
+-        if (!AmapConfiguration.prepare(applicationContext)) {
++        // Decide before any SDK initialization: reading the saved key is not
++        // initialization, and the keyless broadcast entry must never be forced
++        // through AmapConfiguration.prepare with a blank key.
++        val startupRoute = KeylessAutoEntry.route(
++            hasAmapKey = AmapConfiguration.effectiveKey(applicationContext) != null,
++            extendedNavSources = BuildConfig.EXTENDED_NAV_SOURCES,
++        )
++        if (startupRoute == StartupRoute.KEYLESS_AUTO) {
++            startActivity(Intent(this, KeylessAutoActivity::class.java))
++            finish()
++            return
++        }
++        if (startupRoute == StartupRoute.AMAP_KEY || !AmapConfiguration.prepare(applicationContext)) {
+             startActivity(Intent(this, AmapKeyActivity::class.java))
+             finish()
+             return
+diff --git a/app/src/main/kotlin/com/garan/tesnav/export/NavAssistV2Protocol.kt b/app/src/main/kotlin/com/garan/tesnav/export/NavAssistV2Protocol.kt
+index 6990721..da61092 100644
+--- a/app/src/main/kotlin/com/garan/tesnav/export/NavAssistV2Protocol.kt
++++ b/app/src/main/kotlin/com/garan/tesnav/export/NavAssistV2Protocol.kt
+@@ -22,6 +22,8 @@ object NavAssistV2Protocol {
+     const val MESSAGE_TYPE = "navigation_snapshot"
+     const val SOURCE_PLATFORM = "android"
+     const val COORDINATE_SYSTEM = "gcj02"
++    const val COORDINATE_SYSTEM_WGS84 = "wgs84"
++    val COORDINATE_SYSTEMS = setOf(COORDINATE_SYSTEM, COORDINATE_SYSTEM_WGS84)
+     const val ENDPOINT_PATH = "/v3/snapshot"
+     const val MIN_INTERVAL_MS = 200L
+     const val DEFAULT_VALID_FOR_MS = 1_200L
+@@ -122,10 +124,15 @@ data class NavAssistV2Lane(
+     val routeAvoid: Boolean,
+ )
+ 
+-/** Owns the session UUID and sequence; the navigation service retains it across exporter rebuilds. */
++/**
++ * Owns the session UUID, sequence and exported coordinate system; the navigation
++ * service retains it across exporter rebuilds. A WGS84 session is only used by
++ * the keyless car-machine broadcast entry, whose position source is Android GPS.
++ */
+ class NavAssistV2Session(
+     sessionId: String = UUID.randomUUID().toString(),
+     private val validForMs: Long = NavAssistV2Protocol.DEFAULT_VALID_FOR_MS,
++    private val coordinateSystem: String = NavAssistV2Protocol.COORDINATE_SYSTEM,
+ ) {
+     @Volatile var sessionId: String = sessionId
+         private set
+@@ -142,6 +149,9 @@ class NavAssistV2Session(
+     }
+ 
+     init {
++        require(coordinateSystem in NavAssistV2Protocol.COORDINATE_SYSTEMS) {
++            "coordinateSystem must be one of ${NavAssistV2Protocol.COORDINATE_SYSTEMS}"
++        }
+         require(sessionId.isNotBlank()) { "sessionId must not be blank" }
+         require(sessionId.length <= 64) { "sessionId must not exceed 64 characters" }
+         require(Regex(NavAssistV2Protocol.SESSION_ID_PATTERN).matches(sessionId)) {
+@@ -160,7 +170,7 @@ class NavAssistV2Session(
+             sequence = nextSequence,
+             sourceWallTimeMs = sourceWallTimeMs,
+             validForMs = validForMs,
+-        )
++        ).copy(coordinateSystem = coordinateSystem)
+     }
+ }
+ 
+diff --git a/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoDisplay.kt b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoDisplay.kt
+new file mode 100644
+index 0000000..5478f50
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoDisplay.kt
+@@ -0,0 +1,158 @@
++package com.garan.tesnav.service
++
++import com.garan.tesnav.export.NavAssistV2ConnectionStatus
++import com.garan.tesnav.model.CameraLanePosition
++import com.garan.tesnav.model.NavigationMode
++import com.garan.tesnav.model.NavigationState
++import java.util.Locale
++
++/** Everything the keyless screen shows, gathered without touching the UI toolkit. */
++internal data class KeylessAutoInputs(
++    val running: Boolean,
++    val broadcastKeyType: Int?,
++    val broadcastAgeMs: Long?,
++    val broadcastFresh: Boolean,
++    val broadcastCount: Long,
++    val locationRejection: KeylessLocationRejection,
++    val locationAccuracyM: Float?,
++    val locationAgeMs: Long?,
++    val mockRejectedCount: Long,
++    val navigation: NavigationState,
++    val c3Status: NavAssistV2ConnectionStatus,
++    val c3Endpoint: String?,
++    val c3Error: String?,
++    val c3Sequence: Long?,
++    val c3Acknowledged: Boolean,
++    val cameraLane: CameraLanePosition?,
++    val sessionId: String,
++    val coordinateSystem: String,
++    val validForMs: Long,
++    val nowElapsedMs: Long,
++)
++
++internal data class KeylessAutoDisplay(
++    val headline: String,
++    val broadcast: String,
++    val location: String,
++    val c3: String,
++    val cameraLane: String,
++    val navigation: String,
++    val link: String,
++) {
++    fun lines(): List<String> = listOf(headline, broadcast, location, c3, cameraLane, navigation, link)
++}
++
++/**
++ * Renders the keyless entry's verification screen.
++ *
++ * Every unknown or expired observation is rendered as 未知 with its reason; a
++ * locally visible "1/1" never becomes an absolute lane index because C3 only
++ * sets `valid` for an absolute confirmation, and an expired receipt is cleared
++ * here before display.
++ */
++internal object KeylessAutoPresenter {
++    fun present(input: KeylessAutoInputs): KeylessAutoDisplay = KeylessAutoDisplay(
++        headline = headline(input),
++        broadcast = broadcast(input),
++        location = location(input),
++        c3 = c3(input),
++        cameraLane = cameraLane(input),
++        navigation = navigation(input),
++        link = link(input),
++    )
++
++    private fun headline(input: KeylessAutoInputs): String = when {
++        !input.running -> "未启动 · 点击下方按钮开始"
++        input.c3Acknowledged -> "运行中 · C3 已回执"
++        else -> "运行中 · 等待 C3 回执"
++    }
++
++    private fun broadcast(input: KeylessAutoInputs): String {
++        val key = input.broadcastKeyType
++        val age = input.broadcastAgeMs
++        if (key == null || age == null) return "车机广播：未收到"
++        val type = when (key) {
++            KeylessAutoState.KEY_NAVIGATION -> "导航数据（10001）"
++            KeylessAutoState.KEY_LANES -> "车道数据（13012）"
++            KeylessAutoState.KEY_TRAFFIC_LIGHT -> "红绿灯（60073）"
++            else -> "未知类型（$key）"
++        }
++        return if (!input.broadcastFresh) {
++            "车机广播：已过期（最近 $type，$age ms 前，共 ${input.broadcastCount} 条）"
++        } else {
++            "车机广播：$type · $age ms 前 · 共 ${input.broadcastCount} 条"
++        }
++    }
++
++    private fun location(input: KeylessAutoInputs): String {
++        val mock = if (input.mockRejectedCount > 0L) " · 已拒绝模拟定位 ${input.mockRejectedCount} 次" else ""
++        if (input.locationRejection != KeylessLocationRejection.NONE) {
++            return "Android 定位（WGS84）：${input.locationRejection.label}$mock"
++        }
++        val accuracy = input.locationAccuracyM?.let { String.format(Locale.US, "±%.1f m", it) } ?: "精度未知"
++        val age = input.locationAgeMs?.let { " · $it ms 前" } ?: ""
++        return "Android 定位（WGS84）：$accuracy$age$mock"
++    }
++
++    private fun c3(input: KeylessAutoInputs): String {
++        val status = when (input.c3Status) {
++            NavAssistV2ConnectionStatus.UNCONFIGURED -> "未配置"
++            NavAssistV2ConnectionStatus.SCANNING -> "正在发现 C3"
++            NavAssistV2ConnectionStatus.MULTIPLE_DEVICES -> "发现多个已认证 C3"
++            NavAssistV2ConnectionStatus.DISCOVERED -> "已发现 C3"
++            NavAssistV2ConnectionStatus.ONLINE -> "已连接"
++            NavAssistV2ConnectionStatus.ERROR -> "错误"
++        }
++        val endpoint = input.c3Endpoint?.let { " $it" }.orEmpty()
++        val sequence = input.c3Sequence?.let { " · 序号 $it" }.orEmpty()
++        val ack = if (input.c3Acknowledged) " · 已确认" else ""
++        val error = input.c3Error?.let { " · $it" }.orEmpty()
++        return "C3 回执：$status$endpoint$sequence$ack$error"
++    }
++
++    private fun cameraLane(input: KeylessAutoInputs): String {
++        val camera = input.cameraLane ?: return "C3 摄像头位置：未知（尚未收到）"
++        if (camera.routeRevision != input.navigation.routeRevision) {
++            return "C3 摄像头位置：未知（路线不一致）"
++        }
++        val live = camera.forDisplay(input.nowElapsedMs)
++        return when {
++            live.valid && live.laneIndex != null -> "C3 摄像头位置：${live.label()}"
++            camera.valid -> "C3 摄像头位置：未知（回执已过期）"
++            else -> "C3 摄像头位置：未知（C3 未确认绝对编号）"
++        }
++    }
++
++    private fun navigation(input: KeylessAutoInputs): String {
++        val state = input.navigation
++        val mode = when (state.navigationMode) {
++            NavigationMode.IDLE -> "未开始"
++            NavigationMode.ROUTE_PLANNED -> "已规划路线"
++            NavigationMode.REALTIME -> "实时导航"
++            NavigationMode.SIMULATION -> "模拟导航"
++            NavigationMode.ARRIVED -> "已到达"
++        }
++        val route = if (state.routePlanned && state.routeMatched == true) "路线已确认" else "路线未确认"
++        val source = when (state.navAssistSourceStatus) {
++            "healthy" -> "数据有效"
++            "inactive" -> "导航未激活"
++            "requiresExplicitStart" -> "等待显式启动"
++            "awaitingLocation" -> "等待定位"
++            "awaitingGuidance" -> "等待车机导航数据"
++            "sourceStalled" -> "车机数据已中断"
++            "sourceClockInvalid" -> "定位时间无效"
++            "guidanceClockInvalid" -> "导航数据时间无效"
++            "progressUnconfirmed" -> "进度未确认"
++            "sourceInvalid" -> "定位信号弱"
++            "routeUnconfirmed" -> "路线未确认"
++            "guidanceUnconfirmed" -> "导航数据未确认"
++            "awaitingSourceRecovery" -> "等待数据恢复"
++            "budgetsUnconfirmed" -> "预算未确认"
++            else -> state.navAssistSourceStatus
++        }
++        return "导航：$mode · $route · $source"
++    }
++
++    private fun link(input: KeylessAutoInputs): String =
++        "会话 ${input.sessionId.take(8)} · 坐标 ${input.coordinateSystem.uppercase(Locale.US)} · 有效期 ${input.validForMs} ms"
++}
+diff --git a/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoLocation.kt b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoLocation.kt
+new file mode 100644
+index 0000000..e73c896
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoLocation.kt
+@@ -0,0 +1,111 @@
++package com.garan.tesnav.service
++
++import com.garan.tesnav.model.NavigationState
++
++/**
++ * Freshness bound for an exported phone position.
++ *
++ * C3 marks a snapshot as `phoneLocalization` when
++ * `sourceWallTimeMs - locationObservedAtMs` exceeds 1000 ms, so a locally stale
++ * fix is never exported as if it were current.
++ */
++internal const val KEYLESS_LOCATION_MAX_AGE_MS = 1_000L
++
++/** Largest accuracy the wire protocol will carry at all. */
++internal const val KEYLESS_LOCATION_MAX_ACCURACY_M = 200f
++
++/** One Android location callback, free of Android types so it can be tested. */
++internal data class KeylessLocationSample(
++    val latitude: Double,
++    val longitude: Double,
++    val accuracyM: Float,
++    val hasAccuracy: Boolean,
++    val bearingDeg: Float?,
++    val speedMps: Float?,
++    /** The receiver's measurement time, never the time this sample was read. */
++    val measuredAtMs: Long,
++    val receivedElapsedMs: Long,
++    val fromMockProvider: Boolean,
++)
++
++/** Why a location callback was or was not exported; shown to the user, never faked. */
++internal enum class KeylessLocationRejection(val label: String) {
++    NONE("定位有效"),
++    MOCK("拒绝模拟定位"),
++    MISSING_ACCURACY("定位无精度"),
++    INVALID_FIX("坐标无效"),
++    STALE("定位已过期"),
++    CLOCK_INVALID("定位时间无效"),
++    PROVIDER_DISABLED("定位服务不可用"),
++    PERMISSION_MISSING("缺少定位权限"),
++}
++
++internal sealed interface KeylessLocationOutcome {
++    data class Accepted(val state: NavigationState) : KeylessLocationOutcome
++    data class Rejected(val reason: KeylessLocationRejection) : KeylessLocationOutcome
++}
++
++/**
++ * Converts one Android location callback into an exportable WGS84 observation.
++ *
++ * Rejects mock providers, missing accuracy, out-of-range or null-island
++ * coordinates, a missing or future measurement time, and a measurement older
++ * than [budgetMs]. The receiver's measurement time is preserved verbatim into
++ * [NavigationState.locationObservedAtMs]; it is never re-stamped at read time,
++ * so a repeated exporter tick cannot renew a stale fix.
++ */
++internal fun keylessLocationOutcome(
++    sample: KeylessLocationSample,
++    nowWallMs: Long,
++    nowElapsedMs: Long,
++    budgetMs: Long = KEYLESS_LOCATION_MAX_AGE_MS,
++): KeylessLocationOutcome {
++    if (sample.fromMockProvider) return KeylessLocationOutcome.Rejected(KeylessLocationRejection.MOCK)
++    if (!sample.hasAccuracy) return KeylessLocationOutcome.Rejected(KeylessLocationRejection.MISSING_ACCURACY)
++    val accuracy = sample.accuracyM
++    if (!accuracy.isFinite() || accuracy <= 0f || accuracy > KEYLESS_LOCATION_MAX_ACCURACY_M) {
++        return KeylessLocationOutcome.Rejected(KeylessLocationRejection.INVALID_FIX)
++    }
++    if (!sample.latitude.isFinite() || sample.latitude !in -90.0..90.0 ||
++        !sample.longitude.isFinite() || sample.longitude !in -180.0..180.0 ||
++        (sample.latitude == 0.0 && sample.longitude == 0.0)
++    ) {
++        return KeylessLocationOutcome.Rejected(KeylessLocationRejection.INVALID_FIX)
++    }
++    if (budgetMs <= 0L || sample.measuredAtMs <= 0L) {
++        return KeylessLocationOutcome.Rejected(KeylessLocationRejection.CLOCK_INVALID)
++    }
++    if (nowWallMs < sample.measuredAtMs || nowWallMs - sample.measuredAtMs > budgetMs) {
++        return KeylessLocationOutcome.Rejected(KeylessLocationRejection.STALE)
++    }
++    if (sample.receivedElapsedMs < 0L || sample.receivedElapsedMs > nowElapsedMs ||
++        nowElapsedMs - sample.receivedElapsedMs > budgetMs
++    ) {
++        return KeylessLocationOutcome.Rejected(KeylessLocationRejection.CLOCK_INVALID)
++    }
++    val bearing = sample.bearingDeg?.takeIf { it.isFinite() && it in 0f..360f }
++    val speedKph = sample.speedMps?.takeIf { it.isFinite() && it >= 0f }?.times(3.6f) ?: 0f
++    return KeylessLocationOutcome.Accepted(
++        NavigationState(
++            latitude = sample.latitude,
++            longitude = sample.longitude,
++            accuracy = accuracy,
++            bearing = bearing,
++            speedKph = speedKph,
++            locationTime = sample.measuredAtMs,
++            locationObservedAtMs = sample.measuredAtMs,
++            locationReceivedElapsedMs = sample.receivedElapsedMs,
++            // Marks the coordinate system at the only place it can be trusted.
++            locationSourceStatus = "phone-gps-wgs84",
++        ),
++    )
++}
++
++/** Convenience wrapper for callers that only need the accepted observation. */
++internal fun keylessLocationState(
++    sample: KeylessLocationSample,
++    nowWallMs: Long,
++    nowElapsedMs: Long,
++    budgetMs: Long = KEYLESS_LOCATION_MAX_AGE_MS,
++): NavigationState? = (keylessLocationOutcome(sample, nowWallMs, nowElapsedMs, budgetMs)
++    as? KeylessLocationOutcome.Accepted)?.state
+diff --git a/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoService.kt b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoService.kt
+new file mode 100644
+index 0000000..bc98208
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoService.kt
+@@ -0,0 +1,450 @@
++package com.garan.tesnav.service
++
++import android.app.Notification
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.app.Service
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.content.IntentFilter
++import android.content.pm.ServiceInfo
++import android.location.Location
++import android.location.LocationListener
++import android.location.LocationManager
++import android.os.Binder
++import android.os.Build
++import android.os.Bundle
++import android.os.IBinder
++import android.os.Looper
++import android.os.PowerManager
++import android.os.SystemClock
++import androidx.core.app.NotificationCompat
++import androidx.core.content.ContextCompat
++import com.garan.tesnav.BuildConfig
++import com.garan.tesnav.KeylessAutoActivity
++import com.garan.tesnav.export.AndroidKeystoreNavAssistIdentity
++import com.garan.tesnav.export.HttpNavAssistV2Exporter
++import com.garan.tesnav.export.JvmUdpNavAssistV3Client
++import com.garan.tesnav.export.NavAssistPairingStore
++import com.garan.tesnav.export.NavAssistV2ExportConfig
++import com.garan.tesnav.export.NavAssistV2Protocol
++import com.garan.tesnav.export.NavAssistV2Session
++import com.garan.tesnav.export.UdpNavAssistV2EndpointDiscovery
++import com.garan.tesnav.model.NavigationState
++import com.garan.tesnav.util.NavigationTrace
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.isActive
++import kotlinx.coroutines.launch
++
++/**
++ * Foreground forwarding entry that needs no AMap Key.
++ *
++ * It uses only the Amap Auto broadcast parser, Android [LocationManager] and the
++ * existing NavAssist v3 UDP exporter. No map, navigation or SDK coordinate
++ * conversion is initialized here, so a missing AMap Key cannot affect it.
++ *
++ * The exported session declares wgs84 because its only position source is
++ * Android GPS. Broadcast GCJ02 positions are dropped by [KeylessAutoState] and
++ * are never mixed with the phone fix.
++ */
++class KeylessAutoService : Service() {
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
++    private val binder = LocalBinder()
++
++    private lateinit var keylessState: KeylessAutoState
++    private lateinit var session: NavAssistV2Session
++    private lateinit var exporter: HttpNavAssistV2Exporter
++
++    private var locationManager: LocationManager? = null
++    private var locationListener: LocationListener? = null
++    private var receiver: BroadcastReceiver? = null
++    private var wakeLock: PowerManager.WakeLock? = null
++    private var evaluationJob: Job? = null
++    private var observationJob: Job? = null
++
++    @Volatile private var latestState = NavigationState()
++    @Volatile private var phoneFix: NavigationState? = null
++    private var lastLocationRejection = KeylessLocationRejection.PROVIDER_DISABLED
++    private var mockRejectedCount = 0L
++    private var validForMs = 0L
++
++    private var c3Status = com.garan.tesnav.export.NavAssistV2ConnectionStatus.UNCONFIGURED
++    private var c3Endpoint: String? = null
++    private var c3Error: String? = null
++    private var c3Sequence: Long? = null
++    private var c3Acknowledged = false
++    private var cameraLane: com.garan.tesnav.model.CameraLanePosition? = null
++
++    private val mutableDisplay = MutableStateFlow(initialDisplay())
++    internal val display: StateFlow<KeylessAutoDisplay> = mutableDisplay.asStateFlow()
++
++    private var lastNotificationLine: String? = null
++
++    inner class LocalBinder : Binder() {
++        fun getService(): KeylessAutoService = this@KeylessAutoService
++    }
++
++    override fun onBind(intent: Intent?): IBinder = binder
++
++    override fun onCreate() {
++        super.onCreate()
++        instanceAlive = true
++        createNotificationChannel()
++        promoteToForeground()
++        acquireWakeLock()
++
++        val budgetMs = BuildConfig.NAV_ASSIST_SOURCE_BUDGET_MS
++        keylessState = KeylessAutoState(budgetMs, BuildConfig.NAV_ASSIST_PROGRESS_BUDGET_MS)
++        keylessState.start(SystemClock.elapsedRealtime())
++
++        // A stopped exporter is terminal and a restart must not inherit a
++        // sequence or a session, so every service instance builds both anew.
++        val config = NavAssistV2ExportConfig(
++            baseUrl = BuildConfig.NAV_ASSIST_V2_URL,
++            intervalMs = BuildConfig.NAV_ASSIST_V2_INTERVAL_MS,
++        )
++        session = NavAssistV2Session(
++            validForMs = config.validForMs,
++            coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++        )
++        val identity = AndroidKeystoreNavAssistIdentity.loadOrCreate(applicationContext)
++        val pairingStore = NavAssistPairingStore(applicationContext)
++        exporter = HttpNavAssistV2Exporter(
++            config = config,
++            stateProvider = { if (keylessState.hasObservations) latestState else null },
++            identity = identity,
++            endpointDiscovery = UdpNavAssistV2EndpointDiscovery(identity, pairingStore),
++            pinnedDeviceProvider = pairingStore::pinnedDevice,
++            useUnauthenticatedUdp = true,
++            requireOwnerHandshake = true,
++            monotonicMs = { SystemClock.elapsedRealtime() },
++            udpClient = JvmUdpNavAssistV3Client(
++                if (BuildConfig.DEBUG) { line -> NavigationTrace.append(filesDir, line, "KeylessAuto-UDP") } else null,
++            ),
++        )
++
++        validForMs = config.validForMs
++        registerBroadcasts()
++        startLocationUpdates()
++        startObservation()
++        evaluationJob = scope.launch {
++            while (isActive) {
++                evaluate()
++                delay(EVALUATION_INTERVAL_MS)
++            }
++        }
++        exporter.start()
++    }
++
++    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++        if (intent?.action == ACTION_STOP) {
++            stopSelf()
++            return START_NOT_STICKY
++        }
++        return START_NOT_STICKY
++    }
++
++    /** Stops forwarding and releases every resource; a restart creates a new instance. */
++    fun stopForwarding() {
++        stopSelf()
++    }
++
++    override fun onDestroy() {
++        instanceAlive = false
++        evaluationJob?.cancel()
++        observationJob?.cancel()
++        evaluationJob = null
++        observationJob = null
++        locationListener?.let { listener -> runCatching { locationManager?.removeUpdates(listener) } }
++        locationListener = null
++        locationManager = null
++        receiver?.let { runCatching { unregisterReceiver(it) } }
++        receiver = null
++        if (::exporter.isInitialized) exporter.stop()
++        phoneFix = null
++        releaseWakeLock()
++        scope.cancel()
++        stopForegroundCompat()
++        super.onDestroy()
++    }
++
++    private fun evaluate() {
++        val nowWallMs = System.currentTimeMillis()
++        val nowElapsedMs = SystemClock.elapsedRealtime()
++        latestState = keylessState.snapshot(nowWallMs, nowElapsedMs)
++        val rejection = locationRejection(nowWallMs)
++        val fix = phoneFix
++        val display = KeylessAutoPresenter.present(
++            KeylessAutoInputs(
++                running = instanceAlive,
++                broadcastKeyType = keylessState.lastBroadcastKeyType,
++                broadcastAgeMs = keylessState.broadcastAgeMs(nowWallMs),
++                broadcastFresh = keylessState.broadcastFresh(nowWallMs),
++                broadcastCount = keylessState.broadcastCount,
++                locationRejection = rejection,
++                locationAccuracyM = fix?.accuracy,
++                locationAgeMs = fix?.locationObservedAtMs?.let { nowWallMs - it },
++                mockRejectedCount = mockRejectedCount,
++                navigation = latestState,
++                c3Status = c3Status,
++                c3Endpoint = c3Endpoint,
++                c3Error = c3Error,
++                c3Sequence = c3Sequence,
++                c3Acknowledged = c3Acknowledged,
++                cameraLane = cameraLane,
++                sessionId = session.sessionId,
++                coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++                validForMs = validForMs,
++                nowElapsedMs = nowElapsedMs,
++            ),
++        )
++        mutableDisplay.value = display
++        updateNotification(display.headline)
++    }
++
++    private fun locationRejection(nowWallMs: Long): KeylessLocationRejection {
++        val fix = phoneFix ?: return lastLocationRejection
++        val observedAt = fix.locationObservedAtMs ?: return lastLocationRejection
++        val age = nowWallMs - observedAt
++        return when {
++            age < 0L -> KeylessLocationRejection.CLOCK_INVALID
++            age <= KEYLESS_LOCATION_MAX_AGE_MS -> KeylessLocationRejection.NONE
++            else -> KeylessLocationRejection.STALE
++        }
++    }
++
++    private fun startObservation() {
++        // Child coroutines of one job so onDestroy cancels every collector together.
++        observationJob = scope.launch {
++            launch { exporter.connectionState.collect { runCatching { evaluate() } } }
++            launch { exporter.status.collect { c3Status = it; runCatching { evaluate() } } }
++            launch { exporter.resolvedEndpoint.collect { c3Endpoint = it; runCatching { evaluate() } } }
++            launch { exporter.lastError.collect { c3Error = it; runCatching { evaluate() } } }
++            launch {
++                exporter.deliveryState.collect { delivery ->
++                    c3Sequence = delivery.sequence
++                    c3Acknowledged = delivery.acknowledged
++                    runCatching { evaluate() }
++                }
++            }
++            launch {
++                exporter.oemVehicleLaneState.collect { lane ->
++                    cameraLane = lane.cameraLanePosition
++                    runCatching { evaluate() }
++                }
++            }
++        }
++    }
++
++    private fun registerBroadcasts() {
++        if (receiver != null) return
++        val registered = object : BroadcastReceiver() {
++            @Suppress("DEPRECATION")
++            override fun onReceive(context: Context?, intent: Intent?) {
++                val extras = intent?.extras ?: return
++                val values = extras.keySet().associateWith { key -> runCatching { extras.get(key) }.getOrNull() }
++                keylessState.receive(
++                    intent.action, values, System.currentTimeMillis(), SystemClock.elapsedRealtime(),
++                )
++            }
++        }
++        val filter = IntentFilter().apply {
++            addAction(AMAP_AUTO_BROADCAST_SEND)
++            addAction(AMAP_AUTO_BROADCAST_RECV)
++        }
++        ContextCompat.registerReceiver(this, registered, filter, ContextCompat.RECEIVER_EXPORTED)
++        receiver = registered
++    }
++
++    private fun startLocationUpdates() {
++        val manager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
++        if (manager == null) {
++            lastLocationRejection = KeylessLocationRejection.PROVIDER_DISABLED
++            return
++        }
++        locationManager = manager
++        val listener = object : LocationListener {
++            override fun onLocationChanged(location: Location) = acceptLocation(location)
++
++            override fun onProviderEnabled(provider: String) {
++                if (lastLocationRejection == KeylessLocationRejection.PROVIDER_DISABLED) {
++                    lastLocationRejection = KeylessLocationRejection.STALE
++                }
++            }
++
++            override fun onProviderDisabled(provider: String) {
++                phoneFix = null
++                lastLocationRejection = KeylessLocationRejection.PROVIDER_DISABLED
++                keylessState.phoneLocation(null)
++            }
++
++            @Deprecated("Legacy callback")
++            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
++        }
++        locationListener = listener
++        val listening = runCatching {
++            manager.requestLocationUpdates(
++                LocationManager.GPS_PROVIDER, LOCATION_INTERVAL_MS, 0f, listener, Looper.getMainLooper(),
++            )
++            true
++        }.getOrDefault(false)
++        if (!listening) lastLocationRejection = KeylessLocationRejection.PROVIDER_DISABLED
++    }
++
++    @Suppress("DEPRECATION")
++    private fun acceptLocation(location: Location) {
++        val nowWallMs = System.currentTimeMillis()
++        val nowElapsedMs = SystemClock.elapsedRealtime()
++        val outcome = keylessLocationOutcome(
++            KeylessLocationSample(
++                latitude = location.latitude,
++                longitude = location.longitude,
++                accuracyM = location.accuracy,
++                hasAccuracy = location.hasAccuracy(),
++                bearingDeg = location.bearing.takeIf { location.hasBearing() },
++                speedMps = location.speed.takeIf { location.hasSpeed() },
++                measuredAtMs = location.time,
++                receivedElapsedMs = nowElapsedMs,
++                fromMockProvider = location.isFromMockProvider,
++            ),
++            nowWallMs,
++            nowElapsedMs,
++        )
++        when (outcome) {
++            is KeylessLocationOutcome.Accepted -> {
++                phoneFix = outcome.state
++                lastLocationRejection = KeylessLocationRejection.NONE
++                keylessState.phoneLocation(outcome.state)
++            }
++            is KeylessLocationOutcome.Rejected -> {
++                phoneFix = null
++                lastLocationRejection = outcome.reason
++                if (outcome.reason == KeylessLocationRejection.MOCK) mockRejectedCount += 1
++                keylessState.phoneLocation(null)
++            }
++        }
++    }
++
++    private fun createNotificationChannel() {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
++        val channel = NotificationChannel(
++            CHANNEL_ID,
++            "车机广播转发",
++            NotificationManager.IMPORTANCE_LOW,
++        ).apply { description = "免高德 Key 的车机导航转发与定位" }
++        (getSystemService(NotificationManager::class.java))?.createNotificationChannel(channel)
++    }
++
++    private fun promoteToForeground() {
++        val notification = buildNotification("正在启动车机广播转发")
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
++        } else {
++            startForeground(NOTIFICATION_ID, notification)
++        }
++    }
++
++    private fun updateNotification(headline: String) {
++        if (headline == lastNotificationLine) return
++        lastNotificationLine = headline
++        (getSystemService(NotificationManager::class.java))?.notify(
++            NOTIFICATION_ID, buildNotification(headline),
++        )
++    }
++
++    private fun buildNotification(text: String): Notification {
++        val open = PendingIntent.getActivity(
++            this, 0, Intent(this, KeylessAutoActivity::class.java),
++            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++        )
++        val stop = PendingIntent.getService(
++            this, 1, Intent(this, KeylessAutoService::class.java).setAction(ACTION_STOP),
++            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++        )
++        return NotificationCompat.Builder(this, CHANNEL_ID)
++            .setContentTitle("特会开 · 车机广播转发")
++            .setContentText(text)
++            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
++            .setOngoing(true)
++            .setOnlyAlertOnce(true)
++            .setContentIntent(open)
++            .addAction(0, "停止", stop)
++            .build()
++    }
++
++    @Suppress("DEPRECATION")
++    private fun stopForegroundCompat() {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
++            stopForeground(STOP_FOREGROUND_REMOVE)
++        } else {
++            stopForeground(true)
++        }
++    }
++
++    private fun acquireWakeLock() {
++        if (wakeLock != null) return
++        val power = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
++        wakeLock = runCatching {
++            power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "tesnav:keylessAuto").apply { acquire() }
++        }.getOrNull()
++    }
++
++    private fun releaseWakeLock() {
++        runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
++        wakeLock = null
++    }
++
++    private fun initialDisplay(): KeylessAutoDisplay = KeylessAutoPresenter.present(
++        KeylessAutoInputs(
++            running = false,
++            broadcastKeyType = null,
++            broadcastAgeMs = null,
++            broadcastFresh = false,
++            broadcastCount = 0L,
++            locationRejection = KeylessLocationRejection.PROVIDER_DISABLED,
++            locationAccuracyM = null,
++            locationAgeMs = null,
++            mockRejectedCount = 0L,
++            navigation = NavigationState(),
++            c3Status = com.garan.tesnav.export.NavAssistV2ConnectionStatus.UNCONFIGURED,
++            c3Endpoint = null,
++            c3Error = null,
++            c3Sequence = null,
++            c3Acknowledged = false,
++            cameraLane = null,
++            sessionId = "--------",
++            coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++            validForMs = 0L,
++            nowElapsedMs = 0L,
++        ),
++    )
++
++    companion object {
++        internal const val ACTION_STOP = "com.garan.tesnav.action.STOP_KEYLESS_AUTO"
++        internal const val AMAP_AUTO_BROADCAST_SEND = "AUTONAVI_STANDARD_BROADCAST_SEND"
++        internal const val AMAP_AUTO_BROADCAST_RECV = "AUTONAVI_STANDARD_BROADCAST_RECV"
++
++        private const val CHANNEL_ID = "tesnav_keyless_auto"
++        private const val NOTIFICATION_ID = 1002
++        private const val LOCATION_INTERVAL_MS = 1_000L
++        private const val EVALUATION_INTERVAL_MS = 250L
++
++        /** Same process only; lets the Activity rebind without creating the service on its own. */
++        @Volatile internal var instanceAlive = false
++            private set
++
++        fun start(context: Context) {
++            ContextCompat.startForegroundService(context, Intent(context, KeylessAutoService::class.java))
++        }
++    }
++}
+diff --git a/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoState.kt b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoState.kt
+new file mode 100644
+index 0000000..291afd7
+--- /dev/null
++++ b/app/src/main/kotlin/com/garan/tesnav/service/KeylessAutoState.kt
+@@ -0,0 +1,107 @@
++package com.garan.tesnav.service
++
++import com.garan.tesnav.model.NavigationSourceGate
++import com.garan.tesnav.model.NavigationState
++
++/**
++ * Pure state for the keyless car-machine broadcast entry.
++ *
++ * The Amap Auto broadcast reports GCJ02 positions, while this entry's only
++ * position source is the phone's Android GPS, which is WGS84. Every broadcast
++ * coordinate field is therefore removed before parsing, so a GCJ02 fix can never
++ * be labelled as, or blended with, a WGS84 observation. The exported session
++ * declares wgs84 accordingly.
++ *
++ * Nothing here initializes an AMap SDK: it only reuses the existing broadcast
++ * parser, the shared source gate and the UDP exporter.
++ */
++internal class KeylessAutoState(private val budgetMs: Long, progressMs: Long) {
++    private val gate = NavigationSourceGate(budgetMs, progressMs)
++    private var navigation: NavigationState? = null
++    // Volatile because the exporter reads hasObservations from its own thread.
++    @Volatile private var phone: NavigationState? = null
++
++    @Volatile
++    var lastBroadcastMs: Long = 0L
++        private set
++    var lastBroadcastKeyType: Int? = null
++        private set
++    var broadcastCount: Long = 0L
++        private set
++
++    /** No exported state exists until a broadcast or a phone fix is observed. */
++    val hasObservations: Boolean get() = lastBroadcastMs > 0L || phone != null
++
++    @Synchronized
++    fun start(elapsedMs: Long) {
++        navigation = null
++        phone = null
++        lastBroadcastMs = 0L
++        lastBroadcastKeyType = null
++        broadcastCount = 0L
++        gate.arm(elapsedMs)
++    }
++
++    @Synchronized
++    fun phoneLocation(value: NavigationState?) {
++        phone = value
++    }
++
++    @Synchronized
++    fun receive(action: String?, values: Map<String, Any?>, wallMs: Long, elapsedMs: Long) {
++        val key = AmapAutoBroadcast.capture(action, values, wallMs).keyType ?: return
++        if (key !in SUPPORTED_KEYS) return
++        lastBroadcastMs = wallMs
++        lastBroadcastKeyType = key
++        broadcastCount += 1
++        // Android GPS is WGS84. Drop every GCJ02 position field: the guidance
++        // parser must fall back to the phone fix, never to a broadcast coordinate.
++        val guidance = values - BROADCAST_COORDINATE_KEYS
++        navigation = when (key) {
++            KEY_NAVIGATION -> AmapAutoBroadcast.navigation(
++                navigation, phone, guidance, wallMs, elapsedMs, budgetMs,
++            )
++            KEY_LANES -> AmapAutoBroadcast.driveWay(
++                navigation, values["EXTRA_DRIVE_WAY"] as? String, wallMs, elapsedMs, budgetMs,
++            )
++            KEY_TRAFFIC_LIGHT -> navigation?.copy(
++                trafficLight = AmapAutoBroadcast.trafficLight(values, wallMs),
++            )
++            else -> navigation
++        }
++    }
++
++    @Synchronized
++    fun broadcastFresh(wallMs: Long): Boolean =
++        budgetMs > 0L && lastBroadcastMs > 0L && lastBroadcastMs <= wallMs &&
++            wallMs - lastBroadcastMs <= budgetMs
++
++    @Synchronized
++    fun broadcastAgeMs(wallMs: Long): Long? =
++        lastBroadcastMs.takeIf { it > 0L && it <= wallMs }?.let { wallMs - it }
++
++    @Synchronized
++    fun snapshot(wallMs: Long, elapsedMs: Long): NavigationState {
++        navigation = AmapAutoBroadcast.refreshLocation(navigation, phone, wallMs, elapsedMs, budgetMs)
++        val state = (navigation ?: NavigationState()).copy(navigationProvider = PROVIDER)
++        return gate.prepare(state, elapsedMs, wallMs).copy(navAssistSourceStatus = gate.reason)
++    }
++
++    internal companion object {
++        const val PROVIDER = "AMAP_AUTO"
++        const val KEY_NAVIGATION = 10001
++        const val KEY_LANES = 13012
++        const val KEY_TRAFFIC_LIGHT = 60073
++        val SUPPORTED_KEYS = setOf(KEY_NAVIGATION, KEY_LANES, KEY_TRAFFIC_LIGHT)
++
++        /**
++         * Every position and accuracy field the Amap Auto broadcast may carry.
++         * Removing them keeps the WGS84 phone fix and the GCJ02 broadcast fix
++         * strictly separate; non-position fields such as CAR_DIRECTION (heading)
++         * and CUR_SPEED stay available.
++         */
++        val BROADCAST_COORDINATE_KEYS = setOf(
++            "CAR_LATITUDE", "CAR_LONGITUDE", "CAR_ACCURACY", "GPS_ACCURACY", "ACCURACY",
++        )
++    }
++}
+diff --git a/app/src/test/kotlin/com/garan/tesnav/KeylessAutoEntryTest.kt b/app/src/test/kotlin/com/garan/tesnav/KeylessAutoEntryTest.kt
+new file mode 100644
+index 0000000..e413a76
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/KeylessAutoEntryTest.kt
+@@ -0,0 +1,84 @@
++package com.garan.tesnav
++
++import java.io.File
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KeylessAutoEntryTest {
++    @Test
++    fun `extended build without a key goes to the keyless entry`() {
++        assertEquals(StartupRoute.KEYLESS_AUTO, KeylessAutoEntry.route(hasAmapKey = false, extendedNavSources = true))
++    }
++
++    @Test
++    fun `a configured key keeps the embedded map with its SDK checks`() {
++        assertEquals(StartupRoute.EMBEDDED_MAP, KeylessAutoEntry.route(hasAmapKey = true, extendedNavSources = true))
++        assertEquals(StartupRoute.EMBEDDED_MAP, KeylessAutoEntry.route(hasAmapKey = true, extendedNavSources = false))
++    }
++
++    @Test
++    fun `a plain build without a key still asks for one`() {
++        assertEquals(StartupRoute.AMAP_KEY, KeylessAutoEntry.route(hasAmapKey = false, extendedNavSources = false))
++    }
++
++    @Test
++    fun `the keyless entry has no AMap SDK reference`() {
++        val keylessSources = listOf(
++            "src/main/kotlin/com/garan/tesnav/KeylessAutoActivity.kt",
++            "src/main/kotlin/com/garan/tesnav/KeylessAutoEntry.kt",
++            "src/main/kotlin/com/garan/tesnav/service/KeylessAutoService.kt",
++            "src/main/kotlin/com/garan/tesnav/service/KeylessAutoState.kt",
++            "src/main/kotlin/com/garan/tesnav/service/KeylessAutoDisplay.kt",
++            "src/main/kotlin/com/garan/tesnav/service/KeylessAutoLocation.kt",
++        )
++
++        for (path in keylessSources) {
++            val source = moduleFile(path).readText()
++            assertFalse("$path must not reference the AMap SDK", source.contains("com.amap"))
++            for (forbidden in FORBIDDEN_SDK_MEMBERS) {
++                assertFalse("$path must not use $forbidden", source.contains(forbidden))
++            }
++        }
++    }
++
++    @Test
++    fun `main activity chooses the keyless entry before any sdk initialization`() {
++        val source = moduleFile("src/main/kotlin/com/garan/tesnav/MainActivity.kt").readText()
++
++        val routeAt = source.indexOf("KeylessAutoEntry.route")
++        val prepareAt = source.indexOf("AmapConfiguration.prepare(applicationContext)")
++        assertTrue("MainActivity must route through KeylessAutoEntry", routeAt >= 0)
++        assertTrue("MainActivity must initialize the SDK", prepareAt >= 0)
++        assertTrue("routing must be decided before AmapConfiguration.prepare", routeAt < prepareAt)
++        assertTrue(source.contains("StartupRoute.KEYLESS_AUTO"))
++        assertTrue(source.contains("KeylessAutoActivity::class.java"))
++    }
++
++    @Test
++    fun `the key editing screen offers the keyless entry`() {
++        val source = moduleFile("src/main/kotlin/com/garan/tesnav/AmapKeyActivity.kt").readText()
++
++        assertTrue(source.contains("BuildConfig.EXTENDED_NAV_SOURCES"))
++        assertTrue(source.contains("KeylessAutoActivity::class.java"))
++    }
++
++    private fun moduleFile(relative: String): File {
++        val suffix = relative.removePrefix("app/")
++        var directory: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
++        while (directory != null) {
++            File(directory, suffix).takeIf(File::isFile)?.let { return it }
++            File(directory, "app/$suffix").takeIf(File::isFile)?.let { return it }
++            directory = directory.parentFile
++        }
++        error("cannot locate $relative from ${System.getProperty("user.dir")}")
++    }
++
++    private companion object {
++        val FORBIDDEN_SDK_MEMBERS = listOf(
++            "MapsInitializer", "AMapNavi", "AMapLocationClient", "MapView", "CoordinateConverter",
++            "ServiceSettings", "NavigationRepository", "AmapConfiguration",
++        )
++    }
++}
+diff --git a/app/src/test/kotlin/com/garan/tesnav/export/NavAssistWgs84SessionTest.kt b/app/src/test/kotlin/com/garan/tesnav/export/NavAssistWgs84SessionTest.kt
+new file mode 100644
+index 0000000..ac76ede
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/export/NavAssistWgs84SessionTest.kt
+@@ -0,0 +1,191 @@
++package com.garan.tesnav.export
++
++import com.garan.tesnav.model.NavigationManeuver
++import com.garan.tesnav.model.NavigationMode
++import com.garan.tesnav.model.NavigationState
++import com.google.gson.Gson
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.Executors
++import java.util.concurrent.LinkedBlockingQueue
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicInteger
++import kotlinx.coroutines.ExecutorCoroutineDispatcher
++import kotlinx.coroutines.asCoroutineDispatcher
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * The keyless car-machine entry exports a WGS84 session. This pins the wire
++ * coordinate system, the terminal stop semantics and the new-session-on-restart
++ * requirement that the keyless service relies on.
++ */
++class NavAssistWgs84SessionTest {
++    private fun activeState() = NavigationState(
++        navAssistControlAllowed = true,
++        navigationMode = NavigationMode.REALTIME,
++        routePlanned = true,
++        routeMatched = true,
++        latitude = 31.2304,
++        longitude = 121.4737,
++        accuracy = 2f,
++        bearing = 90f,
++        speedKph = 30f,
++        locationObservedAtMs = 1_000L,
++        guidanceObservedAtMs = 1_000L,
++        guidanceStepIndex = 2,
++        routeRevision = 7L,
++        maneuver = NavigationManeuver.TURN_RIGHT,
++    )
++
++    @Test
++    fun `the default session still exports gcj02`() {
++        val snapshot = NavAssistV2Session("default-coordinates").nextSnapshot(activeState(), 4_000L)
++
++        assertEquals("gcj02", snapshot.coordinateSystem)
++        assertEquals(NavAssistV2Protocol.COORDINATE_SYSTEM, snapshot.coordinateSystem)
++    }
++
++    @Test
++    fun `a wgs84 session exports wgs84 and never changes the shared default`() {
++        val keyless = NavAssistV2Session(
++            sessionId = "keyless-coordinates",
++            validForMs = 500L,
++            coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++        )
++
++        assertEquals("wgs84", keyless.nextSnapshot(activeState(), 4_000L).coordinateSystem)
++        assertEquals("gcj02", NavAssistV2Session("unrelated").nextSnapshot(activeState(), 4_000L).coordinateSystem)
++    }
++
++    @Test
++    fun `an undocumented coordinate system is rejected`() {
++        for (value in listOf("bd09", "GCJ02", "", "unknown")) {
++            val failure = runCatching {
++                NavAssistV2Session(sessionId = "bad-coordinates", coordinateSystem = value)
++            }.exceptionOrNull()
++            assertTrue("$value must be rejected", failure is IllegalArgumentException)
++        }
++    }
++
++    @Test
++    fun `the exported wire body carries both the wgs84 label and the real phone fix`() {
++        val bodies = LinkedBlockingQueue<String>()
++        val session = NavAssistV2Session(
++            sessionId = "wire-coordinates",
++            validForMs = 500L,
++            coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++        )
++        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { dispatcher ->
++            val exporter = exporter(
++                session,
++                NavAssistV3UdpClient { body, _, _ ->
++                    bodies.put(body.decodeToString())
++                    NavAssistV3UdpAck("192.168.53.232", null)
++                },
++                dispatcher,
++            )
++            try {
++                exporter.start()
++                val snapshot = Gson().fromJson(
++                    bodies.poll(2, TimeUnit.SECONDS) ?: error("missing snapshot"),
++                    NavAssistV2Snapshot::class.java,
++                )
++                assertEquals("wgs84", snapshot.coordinateSystem)
++                assertEquals(31.2304, snapshot.location!!.latitude, 0.0)
++                assertEquals(1_000L, snapshot.location!!.observedAtMs)
++            } finally {
++                exporter.stop()
++            }
++        }
++    }
++
++    @Test
++    fun `a stopped keyless exporter is terminal so a restart needs a new instance and session`() {
++        val sends = AtomicInteger()
++        val sessions = CopyOnWriteArrayList<String>()
++        val udpClient = NavAssistV3UdpClient { _, sessionId, _ ->
++            sends.incrementAndGet()
++            sessions.add(sessionId)
++            NavAssistV3UdpAck("192.168.53.232", null)
++        }
++        val firstSession = NavAssistV2Session(
++            sessionId = "restart-first",
++            validForMs = 500L,
++            coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++        )
++        val secondSession = NavAssistV2Session(
++            sessionId = "restart-second",
++            validForMs = 500L,
++            coordinateSystem = NavAssistV2Protocol.COORDINATE_SYSTEM_WGS84,
++        )
++        assertNotEquals(firstSession.sessionId, secondSession.sessionId)
++
++        Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { dispatcher ->
++            val first = exporter(firstSession, udpClient, dispatcher)
++            var afterStop = 0
++            try {
++                first.start()
++                assertTrue("first session never sent", await { sends.get() > 0 })
++                first.stop()
++                afterStop = sends.get()
++                Thread.sleep(RESTART_OBSERVATION_MS)
++                assertEquals("stop must halt publishing", afterStop, sends.get())
++                // A stopped exporter is terminal; restarting the same instance must not resume.
++                first.start()
++                Thread.sleep(RESTART_OBSERVATION_MS)
++                assertEquals("a stopped exporter must not restart", afterStop, sends.get())
++            } finally {
++                first.stop()
++            }
++
++            // Restart is only possible with a new exporter and a new session.
++            val second = exporter(secondSession, udpClient, dispatcher)
++            try {
++                second.start()
++                assertTrue("replacement session never sent", await { sends.get() > afterStop })
++            } finally {
++                second.stop()
++            }
++        }
++
++        assertTrue(sessions.contains(firstSession.sessionId))
++        assertTrue(sessions.contains(secondSession.sessionId))
++    }
++
++    private fun exporter(
++        session: NavAssistV2Session,
++        udpClient: NavAssistV3UdpClient,
++        dispatcher: ExecutorCoroutineDispatcher,
++    ) = HttpNavAssistV2Exporter(
++        config = NavAssistV2ExportConfig(baseUrl = ""),
++        stateProvider = { activeState() },
++        identity = AndroidKeystoreNavAssistIdentity.generatedForTest(),
++        endpointDiscovery = NavAssistV2EndpointDiscovery {
++            NavAssistV2DiscoveryResult.Found("192.168.53.232", "0123456789abcdef0123456789abcdef")
++        },
++        pinnedDeviceProvider = { null },
++        useUnauthenticatedUdp = true,
++        udpClient = udpClient,
++        publisherDispatcher = dispatcher,
++        navigationSession = session,
++        requireOwnerHandshake = true,
++        ownerSettleMs = 0L,
++        monotonicMs = { 0L },
++        feedbackElapsedMs = { 0L },
++    )
++
++    private fun await(timeoutMs: Long = 2_000L, condition: () -> Boolean): Boolean {
++        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
++        while (System.nanoTime() < deadline) {
++            if (condition()) return true
++            Thread.sleep(10L)
++        }
++        return condition()
++    }
++
++    private companion object {
++        const val RESTART_OBSERVATION_MS = 800L
++    }
++}
+diff --git a/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoLocationTest.kt b/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoLocationTest.kt
+new file mode 100644
+index 0000000..c38ea9d
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoLocationTest.kt
+@@ -0,0 +1,111 @@
++package com.garan.tesnav.service
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Test
++
++class KeylessAutoLocationTest {
++    private fun sample(
++        latitude: Double = 31.2304,
++        longitude: Double = 121.4737,
++        accuracyM: Float = 6f,
++        hasAccuracy: Boolean = true,
++        measuredAtMs: Long = 10_000L,
++        receivedElapsedMs: Long = 1_000L,
++        fromMockProvider: Boolean = false,
++        bearingDeg: Float? = 90f,
++        speedMps: Float? = 12f,
++    ) = KeylessLocationSample(
++        latitude = latitude,
++        longitude = longitude,
++        accuracyM = accuracyM,
++        hasAccuracy = hasAccuracy,
++        bearingDeg = bearingDeg,
++        speedMps = speedMps,
++        measuredAtMs = measuredAtMs,
++        receivedElapsedMs = receivedElapsedMs,
++        fromMockProvider = fromMockProvider,
++    )
++
++    @Test
++    fun `a fresh real fix is exported with its original measurement time and WGS84 marker`() {
++        val outcome = keylessLocationOutcome(sample(), nowWallMs = 10_200L, nowElapsedMs = 1_200L)
++
++        val state = (outcome as KeylessLocationOutcome.Accepted).state
++        assertEquals(31.2304, state.latitude!!, 0.0)
++        assertEquals(121.4737, state.longitude!!, 0.0)
++        assertEquals(6f, state.accuracy!!, 0f)
++        assertEquals(90f, state.bearing!!, 0f)
++        assertEquals(12f * 3.6f, state.speedKph, 0.001f)
++        // Measurement time, not read time: a later tick cannot renew the fix.
++        assertEquals(10_000L, state.locationObservedAtMs)
++        assertEquals(10_000L, state.locationTime)
++        assertEquals(1_000L, state.locationReceivedElapsedMs)
++        assertEquals("phone-gps-wgs84", state.locationSourceStatus)
++    }
++
++    @Test
++    fun `mock, inaccurate, invalid and null island fixes are rejected`() {
++        val rejected = mapOf(
++            sample(fromMockProvider = true) to KeylessLocationRejection.MOCK,
++            sample(hasAccuracy = false) to KeylessLocationRejection.MISSING_ACCURACY,
++            sample(accuracyM = 0f) to KeylessLocationRejection.INVALID_FIX,
++            sample(accuracyM = Float.NaN) to KeylessLocationRejection.INVALID_FIX,
++            sample(accuracyM = 250f) to KeylessLocationRejection.INVALID_FIX,
++            sample(latitude = 95.0) to KeylessLocationRejection.INVALID_FIX,
++            sample(longitude = -190.0) to KeylessLocationRejection.INVALID_FIX,
++            sample(latitude = 0.0, longitude = 0.0) to KeylessLocationRejection.INVALID_FIX,
++            sample(measuredAtMs = 0L) to KeylessLocationRejection.CLOCK_INVALID,
++        )
++
++        for ((value, reason) in rejected) {
++            val outcome = keylessLocationOutcome(value, nowWallMs = 10_200L, nowElapsedMs = 1_200L)
++            assertEquals(reason, (outcome as KeylessLocationOutcome.Rejected).reason)
++        }
++    }
++
++    @Test
++    fun `stale or future measurement times never become a valid position`() {
++        assertEquals(
++            KeylessLocationRejection.STALE,
++            (keylessLocationOutcome(sample(), nowWallMs = 11_001L, nowElapsedMs = 1_200L)
++                as KeylessLocationOutcome.Rejected).reason,
++        )
++        // A measurement in the future is a clock problem, never freshness.
++        assertEquals(
++            KeylessLocationRejection.STALE,
++            (keylessLocationOutcome(sample(), nowWallMs = 9_999L, nowElapsedMs = 1_200L)
++                as KeylessLocationOutcome.Rejected).reason,
++        )
++    }
++
++    @Test
++    fun `a stale receive elapsed time is rejected even with a recent measurement`() {
++        assertEquals(
++            KeylessLocationRejection.CLOCK_INVALID,
++            (keylessLocationOutcome(sample(), nowWallMs = 10_200L, nowElapsedMs = 2_500L)
++                as KeylessLocationOutcome.Rejected).reason,
++        )
++    }
++
++    @Test
++    fun `optional bearing and speed stay absent instead of being invented`() {
++        val state = keylessLocationState(
++            sample(bearingDeg = null, speedMps = null), nowWallMs = 10_200L, nowElapsedMs = 1_200L,
++        )!!
++
++        assertNull(state.bearing)
++        assertEquals(0f, state.speedKph, 0f)
++    }
++
++    @Test
++    fun `the convenience wrapper only returns accepted fixes`() {
++        assertNull(keylessLocationState(sample(fromMockProvider = true), 10_200L, 1_200L))
++        assertNull(keylessLocationState(sample(measuredAtMs = 0L), 10_200L, 1_200L))
++        assertEquals(
++            31.2304,
++            keylessLocationState(sample(), 10_200L, 1_200L)!!.latitude!!,
++            0.0,
++        )
++    }
++}
+diff --git a/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoPresenterTest.kt b/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoPresenterTest.kt
+new file mode 100644
+index 0000000..c30cbdd
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoPresenterTest.kt
+@@ -0,0 +1,196 @@
++package com.garan.tesnav.service
++
++import com.garan.tesnav.export.NavAssistV2ConnectionStatus
++import com.garan.tesnav.model.CameraLanePosition
++import com.garan.tesnav.model.NavigationMode
++import com.garan.tesnav.model.NavigationState
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KeylessAutoPresenterTest {
++    private fun camera(
++        valid: Boolean = true,
++        laneIndex: Int? = 2,
++        laneCount: Int? = 4,
++        ageAtReceiptMs: Long = 0L,
++        validForMs: Long = 1_200L,
++        receivedAtElapsedMs: Long = 1_000L,
++        routeRevision: Long = 7L,
++    ) = CameraLanePosition(valid, laneIndex, laneCount, ageAtReceiptMs, validForMs, receivedAtElapsedMs, routeRevision)
++
++    private fun inputs(
++        running: Boolean = true,
++        broadcastKeyType: Int? = 10_001,
++        broadcastAgeMs: Long? = 200L,
++        broadcastFresh: Boolean = true,
++        broadcastCount: Long = 42L,
++        locationRejection: KeylessLocationRejection = KeylessLocationRejection.NONE,
++        locationAccuracyM: Float? = 8.5f,
++        locationAgeMs: Long? = 300L,
++        mockRejectedCount: Long = 0L,
++        navigation: NavigationState = NavigationState(
++            navigationMode = NavigationMode.REALTIME,
++            routePlanned = true,
++            routeMatched = true,
++            navAssistSourceStatus = "healthy",
++            routeRevision = 7L,
++        ),
++        c3Status: NavAssistV2ConnectionStatus = NavAssistV2ConnectionStatus.ONLINE,
++        c3Endpoint: String? = "udp://192.168.53.232:4213",
++        c3Error: String? = null,
++        c3Sequence: Long? = 128L,
++        c3Acknowledged: Boolean = true,
++        cameraLane: CameraLanePosition? = null,
++        sessionId: String = "1f3c5b7a-9d2e-4a11-b0c3-8e7f6a5d4c3b",
++        coordinateSystem: String = "wgs84",
++        validForMs: Long = 1_200L,
++        nowElapsedMs: Long = 1_500L,
++    ) = KeylessAutoInputs(
++        running, broadcastKeyType, broadcastAgeMs, broadcastFresh, broadcastCount, locationRejection,
++        locationAccuracyM, locationAgeMs, mockRejectedCount, navigation, c3Status, c3Endpoint, c3Error,
++        c3Sequence, c3Acknowledged, cameraLane, sessionId, coordinateSystem, validForMs, nowElapsedMs,
++    )
++
++    @Test
++    fun `an absolute confirmed lane is shown with its total`() {
++        val display = KeylessAutoPresenter.present(inputs(cameraLane = camera()))
++
++        assertEquals("C3 摄像头位置：第 2／4 车道", display.cameraLane)
++    }
++
++    @Test
++    fun `an expired receipt becomes unknown instead of keeping the last index`() {
++        val display = KeylessAutoPresenter.present(
++            inputs(cameraLane = camera(), nowElapsedMs = 3_000L),
++        )
++
++        assertEquals("C3 摄像头位置：未知（回执已过期）", display.cameraLane)
++    }
++
++    @Test
++    fun `a receipt for another route revision is rejected as unknown`() {
++        val display = KeylessAutoPresenter.present(
++            inputs(
++                cameraLane = camera(routeRevision = 9L),
++                navigation = NavigationState(routeRevision = 7L),
++            ),
++        )
++
++        assertEquals("C3 摄像头位置：未知（路线不一致）", display.cameraLane)
++    }
++
++    @Test
++    fun `a visible-only observation is never promoted to an absolute index`() {
++        val display = KeylessAutoPresenter.present(
++            inputs(cameraLane = camera(valid = false, laneIndex = null, laneCount = null)),
++        )
++
++        assertEquals("C3 摄像头位置：未知（C3 未确认绝对编号）", display.cameraLane)
++    }
++
++    @Test
++    fun `no camera receipt at all shows unknown`() {
++        assertEquals(
++            "C3 摄像头位置：未知（尚未收到）",
++            KeylessAutoPresenter.present(inputs(cameraLane = null)).cameraLane,
++        )
++    }
++
++    @Test
++    fun `an expired broadcast is reported as expired with its age`() {
++        val display = KeylessAutoPresenter.present(
++            inputs(broadcastFresh = false, broadcastAgeMs = 4_500L),
++        )
++
++        assertTrue(display.broadcast.contains("已过期"))
++        assertTrue(display.broadcast.contains("4500 ms 前"))
++        assertTrue(display.broadcast.contains("导航数据（10001）"))
++    }
++
++    @Test
++    fun `a fresh broadcast reports its real type and age`() {
++        assertEquals(
++            "车机广播：车道数据（13012） · 120 ms 前 · 共 42 条",
++            KeylessAutoPresenter.present(inputs(broadcastKeyType = 13_012, broadcastAgeMs = 120L)).broadcast,
++        )
++    }
++
++    @Test
++    fun `location rejection and mock rejections are shown, never a fabricated accuracy`() {
++        val display = KeylessAutoPresenter.present(
++            inputs(
++                locationRejection = KeylessLocationRejection.STALE,
++                locationAccuracyM = null,
++                locationAgeMs = null,
++                mockRejectedCount = 3L,
++            ),
++        )
++
++        assertEquals("Android 定位（WGS84）：定位已过期 · 已拒绝模拟定位 3 次", display.location)
++    }
++
++    @Test
++    fun `a fresh fix shows its real accuracy and age`() {
++        assertEquals(
++            "Android 定位（WGS84）：±8.5 m · 300 ms 前",
++            KeylessAutoPresenter.present(inputs()).location,
++        )
++    }
++
++    @Test
++    fun `the c3 line separates discovery, acknowledgement and errors`() {
++        assertEquals(
++            "C3 回执：已连接 udp://192.168.53.232:4213 · 序号 128 · 已确认",
++            KeylessAutoPresenter.present(inputs()).c3,
++        )
++        assertEquals(
++            "C3 回执：正在发现 C3",
++            KeylessAutoPresenter.present(
++                inputs(c3Status = NavAssistV2ConnectionStatus.SCANNING, c3Endpoint = null, c3Sequence = null, c3Acknowledged = false),
++            ).c3,
++        )
++        assertEquals(
++            "C3 回执：错误 · 未收到 C3XL UDP 确认",
++            KeylessAutoPresenter.present(
++                inputs(
++                    c3Status = NavAssistV2ConnectionStatus.ERROR,
++                    c3Endpoint = null,
++                    c3Sequence = null,
++                    c3Acknowledged = false,
++                    c3Error = "未收到 C3XL UDP 确认",
++                ),
++            ).c3,
++        )
++    }
++
++    @Test
++    fun `the link line proves the exported coordinate system and session`() {
++        val display = KeylessAutoPresenter.present(inputs())
++
++        assertEquals("会话 1f3c5b7a · 坐标 WGS84 · 有效期 1200 ms", display.link)
++    }
++
++    @Test
++    fun `an unconfirmed route is reported as unconfirmed, not as active`() {
++        val display = KeylessAutoPresenter.present(
++            inputs(
++                navigation = NavigationState(
++                    navigationMode = NavigationMode.IDLE,
++                    routePlanned = false,
++                    navAssistSourceStatus = "inactive",
++                ),
++            ),
++        )
++
++        assertEquals("导航：未开始 · 路线未确认 · 导航未激活", display.navigation)
++    }
++
++    @Test
++    fun `a stopped service reports not started`() {
++        assertEquals(
++            "未启动 · 点击下方按钮开始",
++            KeylessAutoPresenter.present(inputs(running = false)).headline,
++        )
++    }
++}
+diff --git a/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoStateTest.kt b/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoStateTest.kt
+new file mode 100644
+index 0000000..41fee3d
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/service/KeylessAutoStateTest.kt
+@@ -0,0 +1,196 @@
++package com.garan.tesnav.service
++
++import com.garan.tesnav.model.NavigationMode
++import com.garan.tesnav.model.NavigationState
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KeylessAutoStateTest {
++    private fun phoneFix(wallMs: Long, elapsedMs: Long) = NavigationState(
++        latitude = 31.2304,
++        longitude = 121.4737,
++        accuracy = 5f,
++        bearing = 90f,
++        speedKph = 40f,
++        locationTime = wallMs,
++        locationObservedAtMs = wallMs,
++        locationReceivedElapsedMs = elapsedMs,
++        locationSourceStatus = "phone-gps-wgs84",
++    )
++
++    private fun navigationExtras(latitude: Double = 32.0, longitude: Double = 122.0) = mapOf<String, Any?>(
++        "KEY_TYPE" to 10001,
++        "ROUTE_ALL_DIS" to 12_000,
++        "ROUTE_REMAIN_DIS" to 8_000,
++        "SEG_REMAIN_DIS" to 120,
++        "ICON" to 3,
++        "ROAD_TYPE" to 1,
++        "CUR_ROAD_NAME" to "当前路",
++        "NEXT_ROAD_NAME" to "下一路",
++        "CAR_DIRECTION" to 90,
++        "CUR_SPEED" to 42,
++        "CAR_LATITUDE" to latitude,
++        "CAR_LONGITUDE" to longitude,
++        "CAR_ACCURACY" to 4f,
++    )
++
++    private val lanes = """{"drive_way_enabled":true,"drive_way_size":3,"drive_way_info":[
++        {"drive_way_lane_Back_icon":"15","trafficLaneAdvised":false},
++        {"drive_way_lane_Back_icon":"18","trafficLaneAdvised":true},
++        {"drive_way_lane_Back_icon":"32","trafficLaneAdvised":false}]}"""
++
++    private fun state(budgetMs: Long = 3_000L, progressMs: Long = 6_000L) = KeylessAutoState(budgetMs, progressMs)
++
++    @Test
++    fun `broadcast GCJ02 position is dropped in favour of the WGS84 phone fix`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.phoneLocation(phoneFix(10_000L, 1_200L))
++        keyless.receive(
++            "AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(32.0, 122.0), 10_000L, 1_200L,
++        )
++
++        val prepared = keyless.snapshot(10_100L, 1_300L)
++
++        assertEquals(31.2304, prepared.latitude!!, 0.0)
++        assertEquals(121.4737, prepared.longitude!!, 0.0)
++        assertEquals(5f, prepared.accuracy!!, 0f)
++        assertEquals(10_000L, prepared.locationObservedAtMs)
++        assertEquals(1_200L, prepared.locationReceivedElapsedMs)
++        assertEquals("phone-gps-wgs84", prepared.locationSourceStatus)
++         assertTrue(prepared.navAssistControlAllowed)
++        assertEquals("healthy", prepared.navAssistSourceStatus)
++    }
++
++    @Test
++    fun `a broadcast position never becomes a location without a phone fix`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.receive(
++            "AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(32.0, 122.0), 10_000L, 1_200L,
++        )
++
++        val prepared = keyless.snapshot(10_100L, 1_300L)
++
++        assertNull(prepared.latitude)
++        assertNull(prepared.longitude)
++        assertNull(prepared.accuracy)
++        assertNull(prepared.locationObservedAtMs)
++        assertFalse(prepared.navAssistControlAllowed)
++        assertEquals("awaitingLocation", prepared.navAssistSourceStatus)
++    }
++
++    @Test
++    fun `a stale phone fix cannot be renewed by exporter ticks`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.phoneLocation(phoneFix(10_000L, 1_200L))
++        keyless.receive(
++            "AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(), 10_000L, 1_200L,
++        )
++
++        val prepared = keyless.snapshot(13_050L, 4_250L)
++
++        // The measurement time is preserved, so the gate must reject the stale fix.
++        assertEquals(10_000L, prepared.locationObservedAtMs)
++        assertFalse(prepared.navAssistControlAllowed)
++        assertTrue(prepared.navAssistSourceStatus in setOf("sourceStalled", "sourceClockInvalid", "progressUnconfirmed"))
++    }
++
++    @Test
++    fun `only the three documented broadcast keys are accepted`() {
++        val keyless = state()
++        keyless.start(1_000L)
++
++        keyless.receive("AUTONAVI_STANDARD_BROADCAST_SEND", mapOf("KEY_TYPE" to 99_999), 10_000L, 1_200L)
++
++        assertNull(keyless.lastBroadcastKeyType)
++        assertFalse(keyless.hasObservations)
++        assertEquals(0L, keyless.broadcastCount)
++    }
++
++    @Test
++    fun `broadcast freshness expires and is reported with a real age`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.receive(
++            "AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(), 10_000L, 1_200L,
++        )
++
++        assertTrue(keyless.broadcastFresh(12_000L))
++        assertFalse(keyless.broadcastFresh(13_001L))
++        assertEquals(3_001L, keyless.broadcastAgeMs(13_001L)!!)
++    }
++
++    @Test
++    fun `lane broadcasts reuse the keyed route binding of the shared parser`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.phoneLocation(phoneFix(10_000L, 1_200L))
++
++        // A lane callback before any keyed guidance cannot install route facts.
++        keyless.receive("AUTONAVI_STANDARD_BROADCAST_SEND", mapOf("KEY_TYPE" to 13012, "EXTRA_DRIVE_WAY" to lanes), 10_000L, 1_200L)
++        assertTrue(keyless.snapshot(10_010L, 1_210L).lanes.isEmpty())
++
++        keyless.receive("AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(), 10_000L, 1_250L)
++        keyless.receive("AUTONAVI_STANDARD_BROADCAST_SEND", mapOf("KEY_TYPE" to 13012, "EXTRA_DRIVE_WAY" to lanes), 10_300L, 1_500L)
++
++        val prepared = keyless.snapshot(10_310L, 1_510L)
++        assertEquals(3, prepared.lanes.size)
++        assertEquals(prepared.acceptedPathId, prepared.lanesPathId)
++        assertEquals("auto", prepared.laneLastEvent)
++    }
++
++    @Test
++    fun `traffic light broadcast never invents route or location facts`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.receive("AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(), 10_000L, 1_200L)
++        keyless.receive(
++            "AUTONAVI_STANDARD_BROADCAST_SEND",
++            mapOf("KEY_TYPE" to 60073, "trafficLightStatus" to 2, "dir" to 2, "redLightCountDownSeconds" to 37),
++            10_100L,
++            1_300L,
++        )
++
++        val prepared = keyless.snapshot(10_110L, 1_310L)
++
++        assertEquals(2, prepared.trafficLight?.status)
++        assertEquals(10_000L, prepared.guidanceObservedAtMs)
++        assertEquals(NavigationMode.REALTIME, prepared.navigationMode)
++        assertTrue(prepared.routePlanned)
++    }
++
++    @Test
++    fun `restarting clears every prior conclusion`() {
++        val keyless = state()
++        keyless.start(1_000L)
++        keyless.phoneLocation(phoneFix(10_000L, 1_200L))
++        keyless.receive("AUTONAVI_STANDARD_BROADCAST_SEND", navigationExtras(), 10_000L, 1_200L)
++        assertTrue(keyless.hasObservations)
++
++        keyless.start(5_000L)
++
++        assertFalse(keyless.hasObservations)
++        assertNull(keyless.lastBroadcastKeyType)
++        assertEquals(0L, keyless.broadcastCount)
++        assertFalse(keyless.broadcastFresh(5_100L))
++        val prepared = keyless.snapshot(5_100L, 5_100L)
++        assertNull(prepared.latitude)
++        assertFalse(prepared.navAssistControlAllowed)
++    }
++
++    @Test
++    fun `no observation produces no export state`() {
++        val keyless = state()
++        keyless.start(1_000L)
++
++        assertFalse(keyless.hasObservations)
++        val prepared = keyless.snapshot(1_100L, 1_100L)
++        assertNull(prepared.latitude)
++        assertNull(prepared.guidanceObservedAtMs)
++    }
++}
+-- 
+2.50.1 (Apple Git-155)
+
