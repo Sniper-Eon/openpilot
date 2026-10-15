@@ -1,19 +1,29 @@
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from openpilot.sunnypilot.lane_topology.external.perception import letterbox
+from openpilot.sunnypilot.lane_topology.external.sender import export_nv12
 from openpilot.sunnypilot.lane_topology.ground_projection import (
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
   boundary_observation_from_image,
+  canvas_point_to_ground,
+  canvas_to_source_pixel,
+  frame_geometry,
   ground_homography,
   image_to_vehicle,
+  source_pixel_to_canvas,
   vehicle_to_image,
 )
 from openpilot.sunnypilot.lane_topology.types import LaneMarkingType
 
 ROOT = Path(__file__).resolve().parents[4]
 
+NATIVE_WIDTH, NATIVE_HEIGHT = 1920, 1080
 FOCAL = 300.0
 PRINCIPAL_X, PRINCIPAL_Y = 320.0, 192.0
 CAMERA_HEIGHT_M = 1.2
@@ -144,3 +154,100 @@ def test_degenerate_or_out_of_range_input_is_refused():
     vehicle_to_image(np.zeros((3, 3)), [(1.0, 1.0)])
   with pytest.raises(ValueError):
     boundary_observation_from_image(-1, [(1.0, 2.0), (3.0, 4.0)], homography)
+
+
+def native_camera_matrix(width: int = NATIVE_WIDTH, height: int = NATIVE_HEIGHT) -> np.ndarray:
+  """The synthetic camera at the native frame size the calibration is expressed in."""
+  focal = FOCAL * width / CANVAS_WIDTH
+  intrinsics = np.array(((focal, 0.0, width / 2), (0.0, focal, height / 2), (0.0, 0.0, 1.0)))
+  view_from_calib = np.array(((0.0, 1.0, 0.0), (0.0, 0.0, -1.0), (1.0, 0.0, 0.0)))
+  return intrinsics @ view_from_calib
+
+
+def fake_nv12_frame(width: int, height: int) -> SimpleNamespace:
+  stride = width
+  uv_offset = stride * height
+  data = np.zeros(uv_offset + stride * (height // 2), dtype=np.uint8).tobytes()
+  return SimpleNamespace(data=data, width=width, height=height, stride=stride, uv_offset=uv_offset)
+
+
+def test_the_canvas_geometry_matches_the_two_resizers_that_actually_run():
+  for width, height in ((1920, 1080), (1280, 960), (640, 384), (1152, 864), (720, 480)):
+    geometry = frame_geometry(width, height)
+
+    # The sender's downscale, checked by running it.
+    exported = export_nv12(fake_nv12_frame(width, height))
+    assert (exported['width'], exported['height']) == (geometry.export_width, geometry.export_height)
+
+    # The observer's letterbox, which runs on the already-downscaled frame.
+    _, (offset_x, offset_y, scaled_width, scaled_height) = letterbox(
+      np.zeros((geometry.export_height, geometry.export_width, 3), dtype=np.uint8))
+    assert (offset_x, offset_y) == (geometry.offset_x, geometry.offset_y)
+    assert (scaled_width, scaled_height) == (geometry.scaled_width, geometry.scaled_height)
+
+
+def test_a_native_pixel_survives_the_canvas_round_trip():
+  geometry = frame_geometry(NATIVE_WIDTH, NATIVE_HEIGHT)
+  assert (geometry.export_width, geometry.export_height) == (640, 360)
+  assert (geometry.offset_x, geometry.offset_y) == (0, 12)
+
+  for pixel in ((960.0, 700.0), (100.0, 900.0), (1800.0, 500.0)):
+    canvas = source_pixel_to_canvas(geometry, pixel)
+    assert 0.0 <= canvas[0] <= 1.0 and 0.0 <= canvas[1] <= 1.0
+    recovered = canvas_to_source_pixel(geometry, canvas)
+    assert recovered[0] == pytest.approx(pixel[0], abs=1e-6)
+    assert recovered[1] == pytest.approx(pixel[1], abs=1e-6)
+
+
+def test_a_canvas_point_maps_back_to_the_ground_position_it_came_from():
+  matrix = native_camera_matrix()
+  geometry = frame_geometry(NATIVE_WIDTH, NATIVE_HEIGHT)
+  homography = ground_homography(matrix, CAMERA_HEIGHT_M)
+  ground = [(8.0, -1.75), (20.0, 0.0), (35.0, 3.5)]
+
+  pixels = vehicle_to_image(homography, ground)
+  assert len(pixels) == len(ground)
+  for (expected_x, expected_y), pixel in zip(ground, pixels, strict=True):
+    canvas = source_pixel_to_canvas(geometry, pixel)
+    recovered = canvas_point_to_ground(geometry, canvas, matrix, CAMERA_HEIGHT_M)
+    assert recovered is not None
+    assert recovered[0] == pytest.approx(expected_x, abs=1e-6)
+    assert recovered[1] == pytest.approx(expected_y, abs=1e-6)
+
+
+def test_the_letterbox_margin_is_padding_and_never_a_road_point():
+  matrix = native_camera_matrix()
+  geometry = frame_geometry(NATIVE_WIDTH, NATIVE_HEIGHT)
+  margin = (0.5, (geometry.offset_y - 1) / CANVAS_HEIGHT)
+
+  with pytest.raises(ValueError):
+    canvas_to_source_pixel(geometry, margin)
+  with pytest.raises(ValueError):
+    canvas_point_to_ground(geometry, margin, matrix, CAMERA_HEIGHT_M)
+  # A point below the horizon, inside the frame, is accepted.
+  ten_metres_ahead = (geometry.offset_y + 216) / CANVAS_HEIGHT
+  placed = canvas_point_to_ground(geometry, (0.5, ten_metres_ahead), matrix, CAMERA_HEIGHT_M)
+  assert placed is not None and placed[0] == pytest.approx(10.0, abs=1e-6)
+
+
+def test_out_of_range_frame_dimensions_are_refused():
+  for width, height in ((30, 384), (640, 30), (4000, 1080), (1920, 3000), (1920.0, 1080), (None, 1080)):
+    with pytest.raises(ValueError):
+      frame_geometry(width, height)
+  # A native frame that needs no downscale still produces a usable geometry.
+  native = frame_geometry(640, 384)
+  assert (native.export_width, native.export_height) == (640, 384)
+  assert (native.offset_x, native.offset_y) == (0, 0)
+  # An odd native height is rounded down to the even export size the sender produces.
+  assert frame_geometry(640, 481).export_height == 480
+
+
+def test_canvas_pairs_must_be_finite_pairs():
+  geometry = frame_geometry(NATIVE_WIDTH, NATIVE_HEIGHT)
+  for bad in ((0.5,), (0.5, 0.5, 0.5), (float('nan'), 0.5), (0.5, float('inf'))):
+    with pytest.raises(ValueError):
+      source_pixel_to_canvas(geometry, bad)
+  with pytest.raises(ValueError):
+    canvas_to_source_pixel(geometry, (0.5,))
+  with pytest.raises(ValueError):
+    canvas_to_source_pixel(geometry, (float('nan'), 0.5))
