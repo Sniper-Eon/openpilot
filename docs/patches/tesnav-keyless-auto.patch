@@ -1,7 +1,7 @@
 From aa2238a4f9414c20692a12df52765532db4a6d53 Mon Sep 17 00:00:00 2001
 From: DeepSeek <liangjiajian@liangjiajiandeMacBook-Air.local>
 Date: Thu, 15 Oct 2026 22:27:02 +0800
-Subject: [PATCH] Add a keyless car-machine broadcast forwarding entry
+Subject: [PATCH 1/2] Add a keyless car-machine broadcast forwarding entry
 
 The extended build forced every start through AmapConfiguration.prepare, so a
 phone without an AMap Key could not use the car-machine navigation broadcast at
@@ -2120,6 +2120,134 @@ index 0000000..41fee3d
 +        val prepared = keyless.snapshot(1_100L, 1_100L)
 +        assertNull(prepared.latitude)
 +        assertNull(prepared.guidanceObservedAtMs)
++    }
++}
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 4a81119f60e1b8d6f91001c1dfc5347e21a37226 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=A2=81=E5=AE=B6=E5=81=A5?=
+ <liangjiajian@liangjiajiandeMacBook-Air.local>
+Date: Thu, 15 Oct 2026 22:47:01 +0800
+Subject: [PATCH 2/2] Pin the C3 lane position wire bytes against the phone
+ parser
+
+The phone's lane position test built its own JSON by hand, so a car-side key
+rename or a dropped null field would have left both suites green while breaking
+the link.
+
+The two replies consumed here are produced by the real car-side stack and pinned
+by openpilot/sunnypilot/navassist/tests/test_lane_position_wire_contract.py. The
+tests also pin that the car must keep sending null for laneIndex and laneCount
+when it has no evidence, because the strict parser requires every key to exist,
+and that in-flight time is added to the car's own age so a slow link expires the
+number instead of showing a stale one.
+
+Assisted-by: DeepSeek
+---
+ .../export/LanePositionWireContractTest.kt    | 94 +++++++++++++++++++
+ 1 file changed, 94 insertions(+)
+ create mode 100644 app/src/test/kotlin/com/garan/tesnav/export/LanePositionWireContractTest.kt
+
+diff --git a/app/src/test/kotlin/com/garan/tesnav/export/LanePositionWireContractTest.kt b/app/src/test/kotlin/com/garan/tesnav/export/LanePositionWireContractTest.kt
+new file mode 100644
+index 0000000..f5e8be0
+--- /dev/null
++++ b/app/src/test/kotlin/com/garan/tesnav/export/LanePositionWireContractTest.kt
+@@ -0,0 +1,94 @@
++package com.garan.tesnav.export
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/**
++ * Consumes the exact bytes the C3 actually sends.
++ *
++ * The two literals below are produced by the real car-side stack and pinned by
++ * `openpilot/sunnypilot/navassist/tests/test_lane_position_wire_contract.py`. If
++ * either side renames a key, drops a null field or changes a type, one of the two
++ * suites fails instead of both passing while the link is broken.
++ */
++class LanePositionWireContractTest {
++    private val confirmed = """{"messageType":"navassist_udp_ack","schemaVersion":3,"sessionId":"session-a","sequence":1,"lanePosition":{"version":1,"valid":true,"laneIndex":2,"laneCount":4,"numbering":"leftToRight","source":"commaCamera","ageMs":200,"validForMs":2000,"routeRevision":1}}"""
++    private val unknown = """{"messageType":"navassist_udp_ack","schemaVersion":3,"sessionId":"session-a","sequence":1,"lanePosition":{"version":1,"valid":false,"laneIndex":null,"laneCount":null,"numbering":"leftToRight","source":"commaCamera","ageMs":0,"validForMs":2000,"routeRevision":1}}"""
++
++    private fun parse(raw: String, transportAgeMs: Long = 0L) = NavAssistV3AckParser.parse(
++        raw.encodeToByteArray(), "10.0.0.2", "session-a", 1, 10_000, 1_000, transportAgeMs,
++    )
++
++    @Test
++    fun `the car's confirmed reply is accepted with its own age and route`() {
++        val position = parse(confirmed)!!.vehicleLane!!.cameraLanePosition!!
++
++        assertTrue(position.valid)
++        assertEquals(2, position.laneIndex)
++        assertEquals(4, position.laneCount)
++        assertEquals(1L, position.routeRevision)
++        assertEquals("第 2／4 车道", position.label())
++        // The car's own age is carried, not the phone's arrival time.
++        assertEquals(1_800L, position.remainingMs(1_000L))
++    }
++
++    @Test
++    fun `the car's no-evidence reply clears the index instead of keeping a number`() {
++        val position = parse(unknown)!!.vehicleLane!!.cameraLanePosition!!
++
++        assertTrue(!position.valid)
++        assertNull(position.laneIndex)
++        assertNull(position.laneCount)
++        assertEquals("未知", position.label())
++    }
++
++    @Test
++    fun `transport time is added to the car's age and can expire the number`() {
++        val fresh = parse(confirmed, 500L)!!.vehicleLane!!.cameraLanePosition!!
++
++        assertTrue(fresh.valid)
++        assertEquals(700L, fresh.ageAtReceiptMs)
++
++        // 200 ms of car age plus 1900 ms in flight exceeds the 2000 ms lifetime.
++        val expired = parse(confirmed, 1_900L)!!.vehicleLane!!.cameraLanePosition!!
++        assertTrue(!expired.valid)
++        assertNull(expired.laneIndex)
++    }
++
++    @Test
++    fun `a renamed or missing key is never read as a lane number`() {
++        for (broken in listOf(
++            confirmed.replace("\"laneIndex\":2", "\"laneIndexX\":2"),
++            confirmed.replace("\"laneCount\":4", "\"count\":4"),
++            confirmed.replace("\"routeRevision\":1", "\"routeRev\":1"),
++            unknown.replace("\"laneCount\":null", "\"unused\":null"),
++        )) {
++            assertNull("$broken must not produce a camera position", parse(broken)!!.vehicleLane)
++        }
++    }
++
++    @Test
++    fun `the car's numbering and source strings are required verbatim`() {
++        for (broken in listOf(
++            confirmed.replace("leftToRight", "rightToLeft"),
++            confirmed.replace("commaCamera", "visibleCorridor"),
++            confirmed.replace("\"version\":1", "\"version\":2"),
++        )) {
++            assertNull(parse(broken)!!.vehicleLane)
++        }
++        // The numbering the car sends is the same one the phone labels with.
++        assertNotNull(parse(confirmed)!!.vehicleLane!!.cameraLanePosition)
++    }
++
++    @Test
++    fun `the car's explicit lane number never grants OEM permissions`() {
++        val lane = parse(confirmed)!!.vehicleLane!!
++
++        assertTrue(!lane.permissionValid)
++        assertTrue(!lane.positionValid)
++        assertTrue(!lane.leftAllowed && !lane.rightAllowed)
 +    }
 +}
 -- 
