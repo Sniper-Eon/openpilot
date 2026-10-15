@@ -5,6 +5,8 @@ import ipaddress
 import json
 import secrets
 import socket
+import subprocess
+import sys
 import threading
 
 PORT = 7789
@@ -33,12 +35,30 @@ def verify_reply(data: bytes, nonce: str, token: str, address: str) -> str:
   return f'http://{address}:{port}'
 
 
-def discover(token: str, *, target: str = '255.255.255.255', port: int = PORT) -> str | None:
+def broadcast_targets() -> list[str]:
+  targets = []
+  if sys.platform.startswith('linux'):
+    try:
+      interfaces=json.loads(subprocess.check_output(['ip','-j','-4','address','show','up'],timeout=1,text=True))
+      for interface in interfaces:
+        for entry in interface.get('addr_info',[]):
+          address=ipaddress.ip_address(entry.get('broadcast',''))
+          if address.version==4 and address.is_private and not address.is_loopback and not address.is_unspecified:
+            targets.append(str(address))
+    except (ValueError,OSError,subprocess.SubprocessError):
+      pass
+  return list(dict.fromkeys(targets))[:4] + ['255.255.255.255']
+
+
+def discover(token: str, *, target: str | None = None, port: int = PORT) -> str | None:
   nonce=secrets.token_hex(16)
   with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
     sock.setsockopt(socket.SOL_SOCKET,socket.SO_BROADCAST,1)
     sock.settimeout(0.25)
-    sock.sendto(json.dumps({'version':1,'nonce':nonce}).encode(),(target,port))
+    payload=json.dumps({'version':1,'nonce':nonce}).encode()
+    for address in ([target] if target else broadcast_targets()):
+      try:sock.sendto(payload,(address,port))
+      except OSError:continue
     for _ in range(4):
       try:
         data,addr=sock.recvfrom(512)

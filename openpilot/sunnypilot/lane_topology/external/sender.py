@@ -37,6 +37,8 @@ def load_config(path: Path = CONFIG_PATH) -> dict | None:
       raise ValueError('host must be a private IP or local mDNS name')
   if not isinstance(value['token'], str) or len(value['token']) < 32:
     raise ValueError('missing pairing token')
+  if 'discovery' in value and type(value['discovery']) is not bool:
+    raise ValueError('discovery must be a switch')
   return value
 
 
@@ -175,7 +177,7 @@ def main():
                  'frame_id': int(client.frame_id), 'capture_mono_ns': captured,
                  'ego_point': ego, 'camera': 'wideRoad'}
         if config.get('discovery'):
-          endpoint = discover(config['token'])
+          endpoint = discover(config['token']) or discover(config['token'], target=urlparse(config['url']).hostname)
           if endpoint is None:
             raise ValueError('paired host not found')
         else:
