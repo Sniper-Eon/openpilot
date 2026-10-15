@@ -157,6 +157,20 @@ def lane_display_from_ui_bridge(topology, marking_types) -> LaneOverlayDisplay |
   )
 
 
+def lane_display_with_external(display: LaneOverlayDisplay | None, result: dict | None, *, local_visible_count: int = 0) -> LaneOverlayDisplay | None:
+  """Only annotate the visible index; offboard estimates never supply markings."""
+  if not result or not result.get('valid') or result.get('absolute_confirmed') is not False:
+    return display
+  count, index = result.get('visible_lane_count'), result.get('ego_lane_index')
+  if type(count) is not int or type(index) is not int or not 0 <= index < count <= 12:
+    return display
+  if count < local_visible_count:
+    return display
+  previous = display or LaneOverlayDisplay('左侧  未知', '车道识别中', '右侧  未知')
+  return LaneOverlayDisplay(previous.left, f'外接可见 {index + 1}/{count}', previous.right,
+                            previous.left_marking, previous.right_marking, previous.reliable)
+
+
 def navigation_display_from_service(
   nav,
   *,

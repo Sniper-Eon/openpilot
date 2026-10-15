@@ -1,0 +1,6 @@
+# Tested on the Apple M4 host. Do not install Torch on Comma.
+torch==2.14.1
+numpy==2.3.5
+opencv-python-headless==5.0.0.93
+Pillow==12.3.0
+requests==2.34.2

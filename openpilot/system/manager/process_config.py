@@ -87,6 +87,11 @@ def navassist_receiver_ready(_started: bool, _params: Params, _CP: car.CarParams
 def navassist_lane_observer_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and CP.brand == "tesla" and navassist_receiver_ready(started, params, CP)
 
+
+def external_lane_observer_ready(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return (navassist_lane_observer_ready(started, params, CP) and
+          os.path.isfile('/data/navassist/external_lane.json'))
+
 def record_route_video(started: bool, params: Params, CP: car.CarParams) -> bool:
   return (get_hardware_profile() != HardwareProfile.C3XL and
           started and params.get_bool("RecordRoadVideo"))
@@ -221,6 +226,8 @@ procs = [
   PythonProcess("navassistd", "openpilot.sunnypilot.navassist.navassistd", navassist_receiver_ready),
   PythonProcess("nav_diagnosticsd", "openpilot.sunnypilot.navassist.diagnosticsd", navassist_receiver_ready),
   PythonProcess("lane_topologyd", "openpilot.sunnypilot.navassist.lane_topologyd", navassist_lane_observer_ready),
+  PythonProcess("external_laned", "openpilot.sunnypilot.lane_topology.external.sender", external_lane_observer_ready,
+                restart_if_crash=True),
   PythonProcess("nav_lane_intentd", "openpilot.sunnypilot.navassist.nav_lane_intentd", navassist_lane_observer_ready),
   PythonProcess("maneuversd", "openpilot.tools.longitudinal_maneuvers.maneuversd", long_maneuver),
   PythonProcess("lateral_maneuversd", "openpilot.tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),

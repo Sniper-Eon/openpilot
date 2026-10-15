@@ -10,10 +10,12 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.lane_navigation_state import (
   NavigationOverlayDisplay,
   lane_display_from_service,
   lane_display_from_ui_bridge,
+  lane_display_with_external,
   navigation_display_from_service,
   overlay_layout,
 )
 from openpilot.system.ui.lib.application import FONT_DIR, FontWeight, gui_app
+from openpilot.sunnypilot.lane_topology.external.protocol import ResultCache
 
 
 BACKGROUND = rl.Color(9, 15, 23, 226)
@@ -27,6 +29,7 @@ class LaneNavigationOverlay:
   """Read-only onroad presentation; render_display also serves the local preview."""
 
   def __init__(self):
+    self._external_lane_cache = ResultCache()
     self._font_bold = gui_app.font(FontWeight.BOLD)
     self._text_font: rl.Font | None = None
     self._characters: set[str] = set()
@@ -43,6 +46,9 @@ class LaneNavigationOverlay:
     )
     if lane_display is None:
       lane_display = lane_display_from_ui_bridge(ui_state.lane_topology, ui_state.lane_topology_bridge.ego_marking_types())
+    local_count = (int(sm['laneTopologyStateSP'].visibleLaneCount)
+                   if lane_display is not None and lane_display.reliable else 0)
+    lane_display = lane_display_with_external(lane_display, self._external_lane_cache.read(), local_visible_count=local_count)
     nav_display = navigation_display_from_service(
       sm["navAssistStateSP"], seen=nav_seen, alive=sm.alive["navAssistStateSP"], valid=sm.valid["navAssistStateSP"],
       lane_intent=sm["navLaneIntentSP"],
