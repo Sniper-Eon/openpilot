@@ -42,7 +42,9 @@ def broadcast_targets() -> list[str]:
       interfaces=json.loads(subprocess.check_output(['ip','-j','-4','address','show','up'],timeout=1,text=True))
       for interface in interfaces:
         for entry in interface.get('addr_info',[]):
-          address=ipaddress.ip_address(entry.get('broadcast',''))
+          if not entry.get('broadcast'):
+            continue
+          address=ipaddress.ip_address(entry['broadcast'])
           if address.version==4 and address.is_private and not address.is_loopback and not address.is_unspecified:
             targets.append(str(address))
     except (ValueError,OSError,subprocess.SubprocessError):

@@ -236,5 +236,6 @@ def test_linux_discovery_uses_directed_wifi_broadcast(monkeypatch):
   from openpilot.sunnypilot.lane_topology.external import discovery
   monkeypatch.setattr(discovery.sys,'platform','linux')
   monkeypatch.setattr(discovery.subprocess,'check_output',lambda *a,**k: json.dumps([
+    {'addr_info':[{'family':'inet','local':'127.0.0.1'}]},
     {'addr_info':[{'family':'inet','local':'192.168.5.182','broadcast':'192.168.5.255'}]}]))
   assert discovery.broadcast_targets() == ['192.168.5.255','255.255.255.255']
