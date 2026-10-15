@@ -111,6 +111,14 @@ class YOLOPv2:
     self.model = torch.jit.load(weights, map_location='cpu').eval().to(device).float()
 
   def infer(self, image: np.ndarray, frame: dict) -> dict:
+    return self.infer_with_masks(image, frame)[0]
+
+  def infer_with_masks(self, image: np.ndarray, frame: dict) -> tuple[dict, np.ndarray, np.ndarray]:
+    """The observation plus the road and lane masks it was traced from.
+
+    Offline tooling needs the masks to measure the curves, and recomputing them
+    outside this class would drift from the pipeline that actually runs.
+    """
     validate_frame(frame)
     started = time.perf_counter()
     padded, (x, y, w, h) = letterbox(image)
@@ -124,4 +132,4 @@ class YOLOPv2:
     # Work in a bounded image coordinate system; camera point is normalized.
     road, lanes = cv2.resize(road, (640, 384)), cv2.resize(lanes, (640, 384))
     boundaries = trace_boundaries(lanes, road, reference_y=frame['ego_point'][1])
-    return observation(frame, boundaries, (time.perf_counter() - started) * 1000)
+    return observation(frame, boundaries, (time.perf_counter() - started) * 1000), road, lanes
