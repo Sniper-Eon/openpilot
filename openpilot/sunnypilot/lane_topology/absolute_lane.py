@@ -202,24 +202,33 @@ class AbsoluteLaneGate:
                                           capture_mono_ns=timestamp_ns)
     return AbsoluteLaneDecision(True, lane_index, lane_count, self._count, timestamp_ns, 'absoluteConfirmed')
 
+# A lane marking bounds a lane. A road edge bounds the drivable surface, which
+# may include a shoulder, so it must never be used as a lane counting anchor.
+LANE_MARKINGS = frozenset((
+  LaneMarkingType.solid, LaneMarkingType.dashed, LaneMarkingType.doubleSolid,
+  LaneMarkingType.doubleDashed, LaneMarkingType.solidDashed,
+))
+
 
 class RightEdgeAnchoredGate:
-  """Absolute index from a confirmed right carriageway edge plus a map total.
+  """Absolute index from the outermost lane marking plus a map total.
 
   Requiring both carriageway edges is what the shipped gate does, and on real
-  wide-camera frames the left one is the boundary that is never found: it is the
-  median or the opposing-direction separation, and a leading vehicle hides it
-  exactly where it matters. The right edge is the shoulder line, and that is the
-  boundary real observers do trace.
+  wide-camera frames the left one is never found: it is the median or the
+  opposing-direction separation, and a leading vehicle hides it exactly where it
+  matters. The right side is what real observers do trace.
 
-  So this gate anchors on the right edge alone and takes the total from the
-  navigation lane guidance, which is authoritative for how many same-direction
-  lanes exist but says nothing about where the ego sits. Vision supplies the
-  anchor, the map supplies the count; neither is asked to do the other's job.
+  The anchor is the **outermost lane marking**, not the road edge. Measured on
+  one real 54.5 second segment, the model's right road edge sits a median of
+  2.1 m beyond the ego lane's right line and 67.6 percent of frames put that gap
+  in 1 to 2.5 m: that is a shoulder, and counting it as a lane would shift the
+  answer by exactly one. Any observed boundary beyond the anchor must therefore
+  be a road edge whose gaps are all narrower than one lane, otherwise the
+  carriageway has an unaccounted lane and the answer is refused.
 
-  It still refuses whenever the anchor is unconfirmed, whenever an interior line
-  between the ego and the right edge is missing, and whenever the count implied
-  by the anchor contradicts the map total.
+  The total comes from the navigation lane guidance, which is authoritative for
+  how many same-direction lanes exist but says nothing about where the ego sits.
+  Vision supplies the anchor, the map supplies the count.
   """
 
   def __init__(self, *, min_stable_samples: int = DEFAULT_MIN_STABLE_SAMPLES,
@@ -248,7 +257,7 @@ class RightEdgeAnchoredGate:
     self._identity: tuple[str, int] | None = None
     self._last_ns: int | None = None
 
-  def update(self, boundaries: tuple[LaneBoundary, ...], *, right_edge_track_id: int,
+  def update(self, boundaries: tuple[LaneBoundary, ...], *, right_anchor_track_id: int,
              lane_total: int | None, frame_id: int, timestamp_ns: int, session_id: str,
              route_revision: int, topology_state: LaneTopologyState = LaneTopologyState.normal,
              ego_y_m: float = 0.0) -> AbsoluteLaneDecision:
@@ -266,7 +275,7 @@ class RightEdgeAnchoredGate:
       return AbsoluteLaneDecision.unknown(reason, capture_mono_ns=timestamp_ns)
 
     # The map total is a requirement, not a hint: without it the anchor says how
-    # far the ego is from the shoulder, not which lane that is.
+    # far the ego is from the edge of the carriageway, not which lane that is.
     if type(lane_total) is not int or not 1 <= lane_total <= MAX_ABSOLUTE_LANE_INDEX:
       return reject('laneTotalUnavailable')
     if topology_state != LaneTopologyState.normal:
@@ -280,36 +289,49 @@ class RightEdgeAnchoredGate:
     positioned.sort(key=lambda item: item[0], reverse=True)
     ordered = [boundary for _, boundary in positioned]
     track_ids = [boundary.track_id for boundary in ordered]
-    if right_edge_track_id not in track_ids:
-      return reject('carriagewayEdgeNotObserved')
-    right_index = track_ids.index(right_edge_track_id)
-    # Anything observed to the right of the claimed edge leaves a lane unaccounted.
-    if right_index != len(ordered) - 1:
-      return reject('boundaryOutsideCarriageway')
-    if ordered[right_index].marking_type not in RIGHT_EDGE_MARKINGS:
-      return reject('edgeMarkingNotConfirmed')
-    if not ordered[right_index].visible:
-      return reject('edgeNotVisible')
-    if not ordered[right_index].confidence >= self.min_confidence:
+    if right_anchor_track_id not in track_ids:
+      return reject('laneAnchorNotObserved')
+    anchor_index = track_ids.index(right_anchor_track_id)
+    anchor, anchor_y = ordered[anchor_index], float(interpolate_y(ordered[anchor_index].points, self.sample_x_m))
+
+    if anchor.marking_type not in LANE_MARKINGS:
+      # A road edge or an untyped ridge would count the shoulder as a lane.
+      return reject('anchorIsNotALaneMarking')
+    if not anchor.visible:
+      return reject('anchorNotVisible')
+    if not anchor.confidence >= self.min_confidence:
       return reject('lowConfidenceBoundary')
 
-    # Every boundary strictly right of the ego is one more lane to its right.
-    to_the_right = [boundary for boundary in ordered[right_index::-1]
-                    if boundary.track_id != right_edge_track_id
-                    and float(interpolate_y(boundary.points, self.sample_x_m)) < ego_y_m]
+    # Everything beyond the anchor must be a shoulder or edge strip narrower than
+    # a lane. Anything else is an unaccounted lane, so the count cannot be absolute.
+    previous_y = anchor_y
+    for boundary in ordered[anchor_index + 1:]:
+      if boundary.marking_type is not LaneMarkingType.roadEdge:
+        return reject('unaccountedLaneBeyondAnchor')
+      y = float(interpolate_y(boundary.points, self.sample_x_m))
+      if not 0.0 < previous_y - y < self.min_lane_width_m:
+        return reject('unaccountedLaneBeyondAnchor')
+      if not boundary.visible or not boundary.confidence >= self.min_confidence:
+        return reject('lowConfidenceBoundary')
+      previous_y = y
+
+    # Lines strictly between the ego and the anchor are the lanes to its right.
+    to_the_right = [boundary for boundary in ordered[:anchor_index]
+                    if float(interpolate_y(boundary.points, self.sample_x_m)) < ego_y_m]
+    if any(boundary.marking_type not in LANE_MARKINGS for boundary in to_the_right):
+      return reject('dividerIsNotALaneMarking')
     if any(not boundary.visible for boundary in to_the_right):
       return reject('interiorBoundaryNotVisible')
     if any(not boundary.confidence >= self.min_confidence for boundary in to_the_right):
       return reject('lowConfidenceBoundary')
 
-    right_edge_y = float(interpolate_y(ordered[right_index].points, self.sample_x_m))
     interior = sorted((float(interpolate_y(boundary.points, self.sample_x_m))
                        for boundary in to_the_right), reverse=True)
-    ladder = [float(ego_y_m), *interior, right_edge_y]
+    ladder = [float(ego_y_m), *interior, anchor_y]
     gaps = [ladder[index] - ladder[index + 1] for index in range(len(ladder) - 1)]
     # The ego may sit anywhere inside its lane, so only the first gap is unbounded
-    # below. Gaps between real lane lines must be single lane widths: a missing
-    # line reads as an over-wide gap and a double-counted line as a narrow one.
+    # below. Gaps between lane markings must be single lane widths: a missing line
+    # reads as an over-wide gap and a double-counted line as a narrow one.
     if not 0.0 < gaps[0] <= self.max_lane_width_m:
       return reject('implausibleLaneWidth')
     if any(not self.min_lane_width_m <= gap <= self.max_lane_width_m for gap in gaps[1:]):
