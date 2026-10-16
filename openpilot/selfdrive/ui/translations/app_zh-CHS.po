@@ -2765,3 +2765,51 @@ msgstr "eGPU 准备完成后，由 {} 运行。"
 #: openpilot/selfdrive/ui/sunnypilot/layouts/settings/models.py
 msgid "{} will drive. If it fails during a drive, {} takes over until the next drive."
 msgstr "由 {} 运行。若行驶中失败，{} 将接管至下次行驶。"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is driving"
+msgstr "大模型正在驾驶"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Handed over: the accelerator runs this model now"
+msgstr "已接管：现在由加速器运行此模型"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is ready"
+msgstr "大模型已就绪"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Loaded, waiting for a takeover window"
+msgstr "已加载，等待接管时机"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is joining"
+msgstr "大模型正在接入"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Link is up, the accelerator has not taken over"
+msgstr "连接已通，加速器尚未接管"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model is retrying"
+msgstr "大模型重试中"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Join failed, the accelerator is trying again"
+msgstr "接入失败，加速器正在重试"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Large model unavailable"
+msgstr "大模型不可用"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "The accelerator reported the link cannot run"
+msgstr "加速器报告连接无法运行"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "Small model is driving"
+msgstr "小模型正在驾驶"
+
+#: openpilot/selfdrive/ui/onroad/accelerator_indicator.py
+msgid "No accelerator state published yet"
+msgstr "尚未收到加速器状态"

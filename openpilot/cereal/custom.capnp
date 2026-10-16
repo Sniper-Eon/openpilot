@@ -556,6 +556,19 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   leftLaneChangeEdgeBlock @1 :Bool;
   rightLaneChangeEdgeBlock @2 :Bool;
 
+  bigModelAvailableDEPRECATED @3 :Bool;
+  acceleratorState @4 :AcceleratorState;
+  acceleratorNameDEPRECATED @5 :Text;
+
+  enum AcceleratorState {
+    none @0;
+    joining @1;
+    running @2;
+    retrying @3;
+    unavailable @4;
+    ready @5;
+  }
+
   enum TurnDirection {
     none @0;
     turnLeft @1;

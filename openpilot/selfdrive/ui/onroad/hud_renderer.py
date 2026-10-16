@@ -1,8 +1,11 @@
+import math
+
 import pyray as rl
 from dataclasses import dataclass
 from openpilot.common.constants import CV
 from openpilot.selfdrive.ui.onroad.exp_button import ExpButton
 from openpilot.selfdrive.ui.egpu_status import egpu_icon_visible, resolve_egpu_connection
+from openpilot.selfdrive.ui.onroad.accelerator_indicator import draw_accelerator_indicator
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.system.ui.lib.application import gui_app, FontWeight
 from openpilot.system.ui.lib.multilang import tr
@@ -120,10 +123,20 @@ class HudRenderer(Widget):
 
     self._draw_current_speed(rect)
     self._draw_egpu_icon(rect)
+    self._draw_accelerator_state(rect)
 
     button_x = rect.x + rect.width - UI_CONFIG.border_size - UI_CONFIG.button_size
     button_y = rect.y + UI_CONFIG.border_size
     self._exp_button.render(rl.Rectangle(button_x, button_y, UI_CONFIG.button_size, UI_CONFIG.button_size))
+
+  def _draw_accelerator_state(self, rect: rl.Rectangle) -> None:
+    """Which model is driving: the large one on the accelerator, or the comma's
+    own. The pill breathes while a join is pending, a state that otherwise looks
+    like a ready accelerator for a whole drive."""
+    pulse = 1.0
+    if ui_state._accelerator_state_name == "joining":
+      pulse = 0.5 - 0.5 * math.cos(rl.get_time() * 6.0)
+    draw_accelerator_indicator(rect, self._font_medium, self._font_semi_bold, pulse=pulse)
 
   def _draw_egpu_icon(self, rect: rl.Rectangle) -> None:
     if not egpu_icon_visible(connected=resolve_egpu_connection(ui_state.sm["deviceState"])):

@@ -13,6 +13,18 @@ TYPEC_CC_ORIENTATION_PATH = Path("/sys/class/power_supply/usb/typec_cc_orientati
 PRIMARY_USB_CONTROLLER = "a600000.ssusb"
 
 
+def is_chestnut_usb_id(vendor_id: int, product_id: int, include_bootloader: bool = False) -> bool:
+  """Whether a USB id is a chestnut, running or (asked for) in its ROM bootloader.
+
+  The ids, not the product string: a board whose firmware predates this build's
+  is still a board, and is_chestnut_runtime_device calls it unowned. The ejector
+  asks the same question of the usbState entries. The UI uses it on a port whose
+  CC pin says a host is there but whose gadget has enumerated nothing yet.
+  """
+  ids = CHESTNUT_USB_IDS + CHESTNUT_ROM_USB_IDS if include_bootloader else CHESTNUT_USB_IDS
+  return (vendor_id, product_id) in ids
+
+
 def is_chestnut_runtime_device(device: dict) -> bool:
   usb_id = (int(device.get("vendorId", 0)), int(device.get("productId", 0)))
   product = str(device.get("product", ""))

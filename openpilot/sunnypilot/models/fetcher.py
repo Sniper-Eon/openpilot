@@ -139,12 +139,22 @@ class ModelCache:
 class ModelFetcher:
   """Handles fetching and caching of model data from remote source"""
   MODEL_URL = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_v22.json"
-  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v25.json"
+  # v26, not a later one: the catalog version and the selector version move
+  # together. v26 is v25 plus Cinque Terre V3 at selector 19, the version this
+  # build requires (helpers.REQUIRED_JSON_VERSION); v27 onwards stamp selector
+  # 20 and a newer tinygrad, and is_bundle_version_compatible drops every one of
+  # their bundles, which reads as "no models available" and clears the pick.
+  # jetlink pins the same v26 (registry.catalog.CATALOG_VERSION), so the two
+  # ends agree on which models exist. The qcom catalog above still pairs with
+  # this build's tinygrad_ref, which is v25/v26's, not v27's.
+  MODEL_URL_CHESTNUT = "https://raw.githubusercontent.com/sunnypilot/sunnypilot-models/refs/heads/gh-pages/docs/driving_models_chestnut_v26.json"
 
   MODEL_SOURCES = {
     "qcom": (MODEL_URL, ""),
     "chestnut": (MODEL_URL_CHESTNUT, "_Chestnut"),
   }
+  # stamped on the big-model catalog: whether it carries the newer catalogs' models
+  EXTENDED_KEY = "extended"
 
   def __init__(self, params: Params):
     self.params = params
@@ -154,6 +164,7 @@ class ModelFetcher:
       for source, (_, suffix) in self.MODEL_SOURCES.items()
     }
     self._refetched: set[str] = set()
+    self._refetched_extends: bool | None = None
     self.params.put("ModelManager_ActiveJson", {
       "qcom": self.MODEL_URL,
       "chestnut": self.MODEL_URL_CHESTNUT,
@@ -169,7 +180,11 @@ class ModelFetcher:
     """
     model_url, _ = self.MODEL_SOURCES[source]
     try:
-      response = requests.get(model_url, timeout=10)
+      # 60 s, not 10: these two catalogs are ~100 KB, and on a slow route to
+      # raw.githubusercontent.com a 10 s read budget expires and the manager
+      # silently keeps the expired cache - which is how a device ends up
+      # unable to see models the accelerator side offers (e.g. CTV3M).
+      response = requests.get(model_url, timeout=60)
 
       # Explicitly handle 404 differently
       if response.status_code == 404:
@@ -180,6 +195,10 @@ class ModelFetcher:
       response.raise_for_status()
 
       json_data = response.json()
+      if source == "chestnut":
+        from openpilot.sunnypilot import jetlink_adapter
+        extended = jetlink_adapter.should_extend_catalog()
+        json_data = {**(jetlink_adapter.extend_catalog(json_data) if extended else json_data), self.EXTENDED_KEY: extended}
       parsed = self.model_parser.parse_models(json_data)
       if parsed:
         self.model_caches[source].set(json_data)
@@ -204,12 +223,26 @@ class ModelFetcher:
       return any(bundle.get("is_big") is True for bundle in bundles)
     return not any(bundle.get("is_big") is True for bundle in bundles)
 
+  def _extension_stale(self, cached_data: dict) -> bool:
+    """Was the big-model catalog fetched for other hardware? A chestnut coming or going
+    changes whether it is extended, and the cache would otherwise hide that for an hour.
+    Once per change: offline, the refetch fails and the cache stands until it expires."""
+    from openpilot.sunnypilot import jetlink_adapter
+    extends = jetlink_adapter.should_extend_catalog()
+    if bool(cached_data.get(self.EXTENDED_KEY)) == extends or self._refetched_extends == extends:
+      return False
+    self._refetched_extends = extends
+    cloudlog.warning(f"big-model catalog was fetched {'without' if extends else 'with'} the newer catalogs; refetching")
+    return True
+
   def get_bundles_for_source(self, source: str) -> list[custom.ModelManagerSP.ModelBundle]:
     if source not in self.MODEL_SOURCES:
       cloudlog.warning(f"Unknown model source: {source}")
       return []
 
     cached_data, is_expired = self.model_caches[source].get()
+    if source == "chestnut" and cached_data and not is_expired and self._extension_stale(cached_data):
+      is_expired = True
 
     if cached_data and not is_expired:
       # a source is refetched over a mismatch at most once per process: if the fresh

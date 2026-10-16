@@ -25,6 +25,7 @@ from openpilot.common.hardware.usb import CHESTNUT_FW_VERSION, chestnut_official
 from openpilot.common.linux import LinuxSystemStats
 from openpilot.system.loggerd.config import get_available_percent
 from openpilot.common.swaglog import cloudlog
+from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.hardware.profile import (
   allows_automatic_power_down, get_hardware_profile, power_down_requested,
 )
@@ -231,6 +232,7 @@ def hardware_thread(end_event, hw_queue) -> None:
   started_ts: float | None = None
   started_seen = False
   startup_blocked_ts: float | None = None
+  accelerator_off_ts: float | None = None
   thermal_status = ThermalStatus.ok
 
   last_hw_state = HardwareState(
@@ -331,6 +333,10 @@ def hardware_thread(end_event, hw_queue) -> None:
     chestnut.update(started_ts is None, last_hw_state.usb_state)
     set_offroad_alert_if_changed("Offroad_ChestnutBranch", msg.deviceState.chestnutPresent and not big_model_available)
 
+    accelerator_error = jetlink_adapter.reason()
+    set_offroad_alert_if_changed("Offroad_AcceleratorUnavailable", accelerator_error is not None,
+                                 extra_text=accelerator_error)
+
     # this subset is only used for offroad
     temp_sources = [
       msg.deviceState.memoryTempC,
@@ -364,6 +370,7 @@ def hardware_thread(end_event, hw_queue) -> None:
     startup_conditions["up_to_date"] = params.get("Offroad_ConnectivityNeeded") is None or params.get_bool("DisableUpdates") or params.get_bool("SnoozeUpdate")
     startup_conditions["no_excessive_actuation"] = params.get("Offroad_ExcessiveActuation") is None
     startup_conditions["not_uninstalling"] = not params.get_bool("DoUninstall")
+    startup_conditions["not_powering_off"] = accelerator_off_ts is None
     startup_conditions["accepted_terms"] = params.get("HasAcceptedTerms") == terms_version
     startup_conditions["accepted_terms_sp"] = params.get("HasAcceptedTermsSP") == terms_version_sp
 
@@ -490,10 +497,15 @@ def hardware_thread(end_event, hw_queue) -> None:
     # ForcePowerDown and the settings UI's DoShutdown path remain available.
     automatic_power_down = allows_automatic_power_down(hardware_profile) and \
                            power_monitor.should_shutdown(onroad_conditions["ignition"], in_car, off_ts, started_seen)
-    if power_down_requested(automatic=automatic_power_down,
-                            manual=params.get_bool("ForcePowerDown"), profile=hardware_profile):
-      cloudlog.warning(f"shutting device down, offroad since {off_ts}")
-      params.put_bool("DoShutdown", True, block=True)
+    should_power_down = power_down_requested(automatic=automatic_power_down,
+                                                manual=params.get_bool("ForcePowerDown"), profile=hardware_profile)
+    if accelerator_off_ts is not None or should_power_down:
+      if accelerator_off_ts is None:
+        cloudlog.warning(f"shutting device down, offroad since {off_ts}")
+        jetlink_adapter.request_shutdown(f"comma shutting down, offroad since {off_ts}")
+        accelerator_off_ts = time.monotonic()
+      if not jetlink_adapter.shutdown_pending() or time.monotonic() - accelerator_off_ts >= 25.0:
+        params.put_bool("DoShutdown", True, block=True)
 
     msg.deviceState.started = started_ts is not None and not offroad_mode
     msg.deviceState.startedMonoTime = int(1e9*(started_ts or 0))

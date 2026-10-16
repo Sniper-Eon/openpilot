@@ -13,6 +13,8 @@ class FakeChestnutState(Enum):
   LOADING = "loading"
   ACTIVE = "active"
   FAILED = "failed"
+  # the accelerator's onroad swap window, as the real enum has it
+  WAITING = "waiting"
 
 
 fake_ui_state_module = ModuleType("openpilot.selfdrive.ui.ui_state")
@@ -42,6 +44,9 @@ def _state(params, bundles, *, present: bool, active: bool | None, loading: bool
     chestnut_active=active,
     chestnut_loading=loading,
     chestnut_state=FakeChestnutState.ACTIVE if active else FakeChestnutState.FAILED,
+    # no jetlink on the bench: model_info reads it for the accelerator's default
+    # and for what is carrying when no board is fitted
+    jetlink=None,
     is_offroad=lambda: offroad,
   )
 
@@ -57,6 +62,22 @@ def test_model_info_uses_chestnut_slot_while_egpu_is_active(monkeypatch):
   assert model_info.active_source() == "chestnut"
   assert model_info.model_info() == ("chestnut", "BIG display", "QCOM display")
   assert model_info.carrying_model() == ("chestnut", "BIG", "BIG display")
+
+
+def test_big_model_progress_is_the_working_stage_only(monkeypatch):
+  """The accelerator's telemetry, which the panels show in place of the icon
+  states: nothing at all without a snapshot, and none for a finished stage."""
+  for progress, expected in ((None, None),
+                             ({'stage': 'ready', 'frac': 1.0, 'msg': 'engine ready'}, None),
+                             ({'stage': '', 'frac': 0.0, 'msg': ''}, None),
+                             ({'stage': 'connect', 'frac': 0.0, 'msg': 'waiting for the accelerator'},
+                              ('connect', 0.0, 'waiting for the accelerator')),
+                             ({'stage': 'build', 'frac': 0.5, 'msg': 'building'}, ('build', 0.5, 'building'))):
+    monkeypatch.setattr(model_info, "ui_state", ns(jetlink=ns(progress=progress)))
+    assert model_info.big_model_progress() == expected
+
+  monkeypatch.setattr(model_info, "ui_state", ns(jetlink=None))
+  assert model_info.big_model_progress() is None
 
 
 def test_custom_big_failure_does_not_claim_a_small_bundle_fallback(monkeypatch):

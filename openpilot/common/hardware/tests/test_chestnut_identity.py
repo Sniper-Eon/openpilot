@@ -1,13 +1,31 @@
 from openpilot.common.hardware.usb import (
   CHESTNUT_FW_VERSION,
+  CHESTNUT_ROM_USB_IDS,
+  CHESTNUT_USB_IDS,
   chestnut_runtime_present,
   chestnut_official_flash_mismatch,
   is_chestnut_runtime_device,
+  is_chestnut_usb_id,
 )
 
 
 def device(vid, pid, product, manufacturer="tiny"):
   return {"vendorId": vid, "productId": pid, "manufacturer": manufacturer, "product": product}
+
+
+def test_usb_ids_cover_the_running_board_and_its_rom_only_when_asked():
+  """The UI names a port by id, where a product string is not there to read;
+  the bootloader ids count only for callers that ask for them."""
+  for vid, pid in CHESTNUT_USB_IDS:
+    assert is_chestnut_usb_id(vid, pid)
+    assert is_chestnut_usb_id(vid, pid, True)
+
+  for vid, pid in CHESTNUT_ROM_USB_IDS:
+    assert not is_chestnut_usb_id(vid, pid)
+    assert is_chestnut_usb_id(vid, pid, True)
+
+  assert not is_chestnut_usb_id(0x2065, 0x2463, True)
+  assert not is_chestnut_usb_id(0x05AC, 0x12A8, True)
 
 
 def test_runtime_and_official_flash_ownership_are_separate():
