@@ -107,6 +107,9 @@ def test_a_missing_or_double_counted_divider_is_refused():
   missing = tuple(b for b in carriageway() if b.track_id != 4)
   spurious = carriageway() + (boundary(8, -5.25),)
 
+  # Dropping the divider leaves a 5.25 m span, past the widest plausible lane, so
+  # it is refused as a width fault. A span that is still plausible as one lane is
+  # refused as ambiguous instead; see the 2.3 m and 4.5 m cases below.
   assert settle(RightEdgeAnchoredGate(), missing, ego_y_m=-1.75).reason == 'implausibleLaneWidth'
   assert settle(RightEdgeAnchoredGate(), spurious, ego_y_m=-1.75).reason == 'implausibleLaneWidth'
 
@@ -196,7 +199,7 @@ def test_a_missing_divider_next_to_the_ego_is_not_absorbed_as_one_wide_lane():
 
   decision = settle(RightEdgeAnchoredGate(), boundaries, ego_y_m=0.0, lane_total=3)
 
-  assert decision.valid is False and decision.reason == 'implausibleLaneWidth'
+  assert decision.valid is False and decision.reason == 'ambiguousSpan'
 
 
 def test_a_lone_lane_marking_with_nothing_outboard_is_not_an_anchor():
@@ -206,3 +209,21 @@ def test_a_lone_lane_marking_with_nothing_outboard_is_not_an_anchor():
   decision = settle(RightEdgeAnchoredGate(), boundaries, ego_y_m=0.0, lane_total=3, anchor=2)
 
   assert decision.valid is False and decision.reason == 'rightBoundaryNotObserved'
+
+def test_a_two_point_three_metre_lane_hidden_by_a_missing_divider_is_refused():
+  """Three 2.3 m lanes, ego centred in the middle one, its own right line missed.
+
+  Coordinates are left-positive and the ego sits at 0, so the ego's left line is
+  at +1.15 and the true outermost marking at -3.45. Two numberings fit the same
+  observations: one 4.6 m lane with the ego inside it, or the real layout of two
+  2.3 m lanes whose shared divider was never seen. Evidence that fits both cannot
+  settle which lane the ego is in, so the gate must not answer.
+  """
+  boundaries = (boundary(1, 1.15, confidence=0.95),
+                boundary(ANCHOR, -3.45, LaneMarkingType.solid, confidence=0.95),
+                boundary(6, -3.75, LaneMarkingType.roadEdge, confidence=0.95))
+
+  decision = settle(RightEdgeAnchoredGate(), boundaries, ego_y_m=0.0, lane_total=3)
+
+  assert decision.valid is False, (decision.lane_index, decision.lane_count)
+  assert decision.reason == 'ambiguousSpan'
