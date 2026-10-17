@@ -56,9 +56,23 @@ def test_stale_vehicle_speed_or_pause_resets_trigger():
     assert not t.update(300_000_000,bad)
     assert not t.update(400_000_000,vehicle(400_000_000))
 
-@pytest.mark.parametrize('arg',[['--hz','nan'],['--hz','21'],['--seconds','1000'],['--max-mib','4096']])
+@pytest.mark.parametrize('arg',[['--hz','nan'],['--hz','21'],['--seconds','3601'],['--max-mib','16384'],['--segment-seconds','nan']])
 def test_invalid_recording_bounds(arg):
   with pytest.raises(SystemExit):arguments(arg)
+
+def test_longer_capture_defaults_are_not_two_minutes():
+  a=arguments([])
+  assert (a.seconds,a.max_mib,a.segment_seconds,a.start)==(900,4096,60,'moving')
+
+def test_segment_rotation_preserves_all_and_cumulative_budget(tmp_path):
+  w=BoundedWriter(tmp_path/'new',max_bytes=55,min_free=0,rotate_seconds=60)
+  w.write({'frame_id':1},now=0);w.write({'frame_id':2},now=61);w.write({'frame_id':3},now=122)
+  with pytest.raises(OSError):w.write({'frame_id':4},now=183)
+  w.close();w.close()
+  files=sorted((tmp_path/'new').glob('*.jsonl'))
+  assert [json.loads(p.read_text())['frame_id'] for p in files]==[1,2,3]
+  assert len(w.closed_files)==3
+  assert sum(p.stat().st_size for p in files)==w.total<=55
 
 def test_analytic_ground_geometry_not_road_validation():
   matrix=[[320,800,0],[200,0,800],[1,0,0]]

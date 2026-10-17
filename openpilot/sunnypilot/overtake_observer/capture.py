@@ -14,20 +14,27 @@ CAR_FIELDS=('vEgo','aEgo','yawRate','steeringAngleDeg','steeringPressed','brakeP
             'gasPressed','leftBlinker','rightBlinker','leftBlindspot','rightBlindspot','canValid')
 
 class BoundedWriter:
-  def __init__(self,root:Path,max_bytes:int,min_free:int=2*1024**3):
+  def __init__(self,root:Path,max_bytes:int,min_free:int=2*1024**3,rotate_seconds:float=0):
     self.root=Path(root);self.root.mkdir(parents=True,exist_ok=False)
     self.max_bytes,self.min_free=max_bytes,min_free;self.total=0;self.stream=None
-    self.path=self.root/'frames.partial'
-  def write(self,record):
+    self.rotate_seconds=rotate_seconds;self.segment=0;self.opened=None;self.closed_files=[]
+    self.path=self.root/('frames-00000.partial' if rotate_seconds else 'frames.partial')
+  def write(self,record,*,now=None):
+    if not self.rotate_seconds and self.closed_files:raise ValueError('writer_closed')
+    now=time.monotonic() if now is None else now
     data=(json.dumps(record,allow_nan=False,separators=(',',':'))+'\n').encode()
     if self.total+len(data)>self.max_bytes:raise OSError('byte_limit')
     if shutil.disk_usage(self.root).free<self.min_free:raise OSError('disk_reserve')
+    if self.stream is not None and self.rotate_seconds and now-self.opened>=self.rotate_seconds:
+      self.close()
     if self.stream is None:
-      self.stream=self.path.open('xb');self.path.chmod(0o600)
+      self.stream=self.path.open('xb');self.path.chmod(0o600);self.opened=now
     self.stream.write(data);self.stream.flush();self.total+=len(data)
   def close(self):
     if self.stream is not None:
-      self.stream.close();self.stream=None;self.path.rename(self.root/'frames.jsonl')
+      self.stream.close();self.stream=None;target=self.path.with_suffix('.jsonl')
+      self.path.rename(target);self.closed_files.append(target.name);self.segment+=1
+      self.path=self.root/(f'frames-{self.segment:05d}.partial' if self.rotate_seconds else 'frames.partial')
 
 def primary_ready(alive,valid,execution,drops,thermal):
   return (alive is True and valid is True and type(execution) in (int,float)
@@ -61,17 +68,19 @@ class MovementTrigger:
 def arguments(argv=None):
   p=argparse.ArgumentParser(description=__doc__)
   p.add_argument('--hz',type=float,default=10)
-  p.add_argument('--seconds',type=float,default=120)
-  p.add_argument('--wait-seconds',type=float,default=600)
-  p.add_argument('--max-mib',type=int,default=512)
+  p.add_argument('--seconds',type=float,default=900)
+  p.add_argument('--wait-seconds',type=float,default=1800)
+  p.add_argument('--max-mib',type=int,default=4096)
+  p.add_argument('--segment-seconds',type=float,default=60)
   p.add_argument('--root',type=Path,default=Path('/data/media/0/motion-evidence'))
   p.add_argument('--start',choices=('moving','camera'),default='moving',
                  help='moving waits for fresh speed >1m/s for0.5s, with <=2s preroll')
   a=p.parse_args(argv)
   if not math.isfinite(a.hz) or not 1<=a.hz<=20:p.error('hz must be 1..20')
-  if not math.isfinite(a.seconds) or not 1<=a.seconds<=180:p.error('seconds must be 1..180')
+  if not math.isfinite(a.seconds) or not 1<=a.seconds<=3600:p.error('seconds must be 1..3600')
   if not math.isfinite(a.wait_seconds) or not 1<=a.wait_seconds<=1800:p.error('wait-seconds must be 1..1800')
-  if not 16<=a.max_mib<=1024:p.error('max-mib must be 16..1024')
+  if not 16<=a.max_mib<=8192:p.error('max-mib must be 16..8192')
+  if not math.isfinite(a.segment_seconds) or not 1<=a.segment_seconds<=120:p.error('segment-seconds must be 1..120')
   return a
 
 def main(argv=None):
@@ -86,7 +95,7 @@ def main(argv=None):
   client=VisionIpcClient('camerad',VisionStreamType.VISION_STREAM_WIDE_ROAD,conflate=True)
   sm=messaging.SubMaster(list(SERVICES));params=Params();connected=False
   session=uuid.uuid4().hex;root=a.root/f'{time.time_ns()}-{session[:8]}'
-  writer=BoundedWriter(root,a.max_mib*1024**2)
+  writer=BoundedWriter(root,a.max_mib*1024**2,rotate_seconds=a.segment_seconds)
   begin=time.monotonic();active=None;deadline=begin;last_stamp=0;stamps=[]
   counters={'frames':0,'stale_or_duplicate':0,'primary_guard_skips':0,'camera_timeouts':0}
   trigger=MovementTrigger();pending=deque(maxlen=int(a.hz*2)+2);trigger_stamp=None
@@ -149,6 +158,7 @@ def main(argv=None):
              'target_hz':a.hz,'observed_hz':(len(stamps)-1)/span if span and span>0 else None,
              'capture_span_s':span,'control_publishers':False,'old_files_deleted':False,
              'start_mode':a.start,'movement_trigger_capture_ns':trigger_stamp,
+             'segments':writer.closed_files,'requested_seconds':a.seconds,'max_bytes':a.max_mib*1024**2,
              'note':'No interpolation; asynchronous service stamps retained; target rate is not measured capacity.'}
     (root/'summary.json').write_text(json.dumps(summary,indent=2));print(json.dumps({'directory':str(root),**summary}),flush=True)
   return 1 if reason=='capture_error' else 0
