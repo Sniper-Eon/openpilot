@@ -1,6 +1,6 @@
 import json
 import pytest
-from openpilot.sunnypilot.overtake_observer.capture import BoundedWriter,primary_ready,arguments
+from openpilot.sunnypilot.overtake_observer.capture import BoundedWriter,primary_ready,arguments,thermal_level
 from openpilot.sunnypilot.overtake_observer.projection import project_box
 from openpilot.sunnypilot.overtake_observer.replay import replay
 
@@ -25,6 +25,16 @@ def test_primary_load_and_heat_guard():
   assert primary_ready(True,True,.03,0,0)
   for values in ((True,True,.046,0,0),(True,True,.03,6,0),(True,True,.03,0,2),(False,True,.03,0,0),(True,True,float('nan'),0,0)):
     assert not primary_ready(*values)
+
+def test_dynamic_thermal_enum_has_no_integer_conversion():
+  class Enum:
+    def __str__(self):return 'green'
+  assert thermal_level(Enum())==0
+  assert thermal_level('red')==2
+  assert thermal_level('ok')==0
+  assert thermal_level('overheated')==2
+  assert thermal_level('critical')==3
+  assert thermal_level('unexpected')==-1
 
 @pytest.mark.parametrize('arg',[['--hz','nan'],['--hz','21'],['--seconds','1000'],['--max-mib','4096']])
 def test_invalid_recording_bounds(arg):

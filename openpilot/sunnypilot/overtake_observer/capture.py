@@ -34,6 +34,12 @@ def primary_ready(alive,valid,execution,drops,thermal):
           and type(drops) in (int,float) and math.isfinite(drops) and 0<=drops<=5
           and type(thermal) is int and 0<=thermal<2)
 
+def thermal_level(value):
+  if type(value) is int:return value
+  # pycapnp DynamicEnum implements str(), but not int(). Unknown stays blocked.
+  return {'ok':0,'warmDEPRECATED':1,'overheated':2,'critical':3,
+          'green':0,'yellow':1,'red':2,'danger':3}.get(str(value),-1)
+
 def arguments(argv=None):
   p=argparse.ArgumentParser(description=__doc__)
   p.add_argument('--hz',type=float,default=10)
@@ -75,13 +81,12 @@ def main(argv=None):
       if not connected:
         connected=client.connect(False)
         if not connected:time.sleep(.2);continue
-      if active is None:active=now
       time.sleep(max(0,deadline-time.monotonic()));deadline=time.monotonic()+1/a.hz
       sm.update(0)
       if not all(sm.seen[s] and sm.alive[s] and sm.valid[s] for s in ('modelV2','deviceState')):
         counters['primary_guard_skips']+=1;continue
       model=sm['modelV2'];device=sm['deviceState']
-      if not primary_ready(True,True,float(model.modelExecutionTime),float(model.frameDropPerc),int(device.thermalStatus)):
+      if not primary_ready(True,True,float(model.modelExecutionTime),float(model.frameDropPerc),thermal_level(device.thermalStatus)):
         counters['primary_guard_skips']+=1;continue
       frame=client.recv(timeout_ms=100)
       if frame is None:counters['camera_timeouts']+=1;continue
@@ -103,8 +108,9 @@ def main(argv=None):
                                'alive':bool(sm.alive[name]),'valid':bool(sm.valid[name]),'data':data}
       row['bsm_note']='carState warnings only; raw SNA/freshness needs matching retained rlog'
       writer.write(finite_values(row));stamps.append(stamp);counters['frames']+=1
+      if active is None:active=time.monotonic()
   except KeyboardInterrupt:reason='interrupted'
-  except (OSError,ValueError) as exc:reason='capture_error';error=type(exc).__name__+': '+str(exc)
+  except Exception as exc:reason='capture_error';error=type(exc).__name__+': '+str(exc)
   finally:
     writer.close()
     span=(stamps[-1]-stamps[0])/1e9 if len(stamps)>1 else None
