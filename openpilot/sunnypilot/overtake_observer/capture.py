@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import time
 import uuid
+from collections import deque
 
 SERVICES=('carState','modelV2','extrinsicsCalibration','wideRoadCameraState','deviceState')
 CAR_FIELDS=('vEgo','aEgo','yawRate','steeringAngleDeg','steeringPressed','brakePressed',
@@ -40,6 +41,23 @@ def thermal_level(value):
   return {'ok':0,'warmDEPRECATED':1,'overheated':2,'critical':3,
           'green':0,'yellow':1,'red':2,'danger':3}.get(str(value),-1)
 
+class MovementTrigger:
+  """Wait for fresh sustained vehicle movement, not merely an onroad screen."""
+  def __init__(self):self.since=None;self.last_source=None;self.last_capture=None
+  def reset(self):self.since=None;self.last_source=None;self.last_capture=None
+  def update(self,captured,service):
+    data=service.get('data',{});speed=data.get('vEgo');source=service.get('log_mono_ns')
+    good=(service.get('alive') is True and service.get('valid') is True
+          and type(source) is int and abs(captured-source)<=200_000_000
+          and type(speed) in (int,float) and math.isfinite(speed) and speed>1.0)
+    if not good:self.reset();return False
+    if self.last_capture is not None and not 0<captured-self.last_capture<=250_000_000:
+      self.reset()
+    if self.last_source is not None and source<=self.last_source:return False
+    self.last_source=source;self.last_capture=captured
+    if self.since is None:self.since=captured
+    return captured-self.since>=500_000_000
+
 def arguments(argv=None):
   p=argparse.ArgumentParser(description=__doc__)
   p.add_argument('--hz',type=float,default=10)
@@ -47,6 +65,8 @@ def arguments(argv=None):
   p.add_argument('--wait-seconds',type=float,default=600)
   p.add_argument('--max-mib',type=int,default=512)
   p.add_argument('--root',type=Path,default=Path('/data/media/0/motion-evidence'))
+  p.add_argument('--start',choices=('moving','camera'),default='moving',
+                 help='moving waits for fresh speed >1m/s for0.5s, with <=2s preroll')
   a=p.parse_args(argv)
   if not math.isfinite(a.hz) or not 1<=a.hz<=20:p.error('hz must be 1..20')
   if not math.isfinite(a.seconds) or not 1<=a.seconds<=180:p.error('seconds must be 1..180')
@@ -69,6 +89,7 @@ def main(argv=None):
   writer=BoundedWriter(root,a.max_mib*1024**2)
   begin=time.monotonic();active=None;deadline=begin;last_stamp=0;stamps=[]
   counters={'frames':0,'stale_or_duplicate':0,'primary_guard_skips':0,'camera_timeouts':0}
+  trigger=MovementTrigger();pending=deque(maxlen=int(a.hz*2)+2);trigger_stamp=None
   reason='completed';error=None
   try:
     while True:
@@ -77,6 +98,7 @@ def main(argv=None):
       if active is not None and now-active>=a.seconds:reason='duration_limit';break
       if params.get_bool('IsOffroad'):
         if active is not None:reason='offroad';break
+        trigger.reset();pending.clear()
         time.sleep(.2);continue
       if not connected:
         connected=client.connect(False)
@@ -107,8 +129,17 @@ def main(argv=None):
         row['services'][name]={'log_mono_ns':log_ns,'capture_minus_message_ns':stamp-log_ns,
                                'alive':bool(sm.alive[name]),'valid':bool(sm.valid[name]),'data':data}
       row['bsm_note']='carState warnings only; raw SNA/freshness needs matching retained rlog'
-      writer.write(finite_values(row));stamps.append(stamp);counters['frames']+=1
-      if active is None:active=time.monotonic()
+      row=finite_values(row)
+      if active is None:
+        pending.append(row)
+        while pending and stamp-pending[0]['capture_mono_ns']>2_000_000_000:pending.popleft()
+        if a.start=='moving' and not trigger.update(stamp,row['services'].get('carState',{})):continue
+        active=time.monotonic();trigger_stamp=stamp
+        for buffered in pending:
+          writer.write(buffered);stamps.append(buffered['capture_mono_ns']);counters['frames']+=1
+        pending.clear()
+      else:
+        writer.write(row);stamps.append(stamp);counters['frames']+=1
   except KeyboardInterrupt:reason='interrupted'
   except Exception as exc:reason='capture_error';error=type(exc).__name__+': '+str(exc)
   finally:
@@ -117,6 +148,7 @@ def main(argv=None):
     summary={'session':session,'stop_reason':reason,'error':error,'counts':counters,'bytes':writer.total,
              'target_hz':a.hz,'observed_hz':(len(stamps)-1)/span if span and span>0 else None,
              'capture_span_s':span,'control_publishers':False,'old_files_deleted':False,
+             'start_mode':a.start,'movement_trigger_capture_ns':trigger_stamp,
              'note':'No interpolation; asynchronous service stamps retained; target rate is not measured capacity.'}
     (root/'summary.json').write_text(json.dumps(summary,indent=2));print(json.dumps({'directory':str(root),**summary}),flush=True)
   return 1 if reason=='capture_error' else 0

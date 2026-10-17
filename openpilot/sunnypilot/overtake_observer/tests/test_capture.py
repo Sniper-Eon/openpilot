@@ -1,6 +1,6 @@
 import json
 import pytest
-from openpilot.sunnypilot.overtake_observer.capture import BoundedWriter,primary_ready,arguments,thermal_level
+from openpilot.sunnypilot.overtake_observer.capture import BoundedWriter,primary_ready,arguments,thermal_level,MovementTrigger
 from openpilot.sunnypilot.overtake_observer.projection import project_box
 from openpilot.sunnypilot.overtake_observer.replay import replay
 
@@ -35,6 +35,26 @@ def test_dynamic_thermal_enum_has_no_integer_conversion():
   assert thermal_level('overheated')==2
   assert thermal_level('critical')==3
   assert thermal_level('unexpected')==-1
+
+def vehicle(capture,speed=3.,offset=0,valid=True):
+  return {'alive':True,'valid':valid,'log_mono_ns':capture+offset,'data':{'vEgo':speed}}
+
+def test_stationary_never_spends_driving_window():
+  t=MovementTrigger()
+  assert not any(t.update(i*100_000_000,vehicle(i*100_000_000,speed=0)) for i in range(100))
+  assert arguments([]).start=='moving'
+
+def test_movement_requires_sustained_fresh_samples():
+  t=MovementTrigger()
+  results=[t.update(i*100_000_000,vehicle(i*100_000_000)) for i in range(6)]
+  assert results==[False]*5+[True]
+
+def test_stale_vehicle_speed_or_pause_resets_trigger():
+  for bad in (vehicle(300_000_000,speed=0),vehicle(300_000_000,offset=-400_000_000),vehicle(300_000_000,valid=False)):
+    t=MovementTrigger()
+    for i in range(3):assert not t.update(i*100_000_000,vehicle(i*100_000_000))
+    assert not t.update(300_000_000,bad)
+    assert not t.update(400_000_000,vehicle(400_000_000))
 
 @pytest.mark.parametrize('arg',[['--hz','nan'],['--hz','21'],['--seconds','1000'],['--max-mib','4096']])
 def test_invalid_recording_bounds(arg):
