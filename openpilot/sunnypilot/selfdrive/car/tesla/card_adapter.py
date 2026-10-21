@@ -24,7 +24,7 @@ NAV_SIGNAL_SESSION_TIMEOUT_NS = 60_000_000_000
 NAV_SIGNAL_RETRY_NS = 500_000_000
 LIGHTING_STALE_NS = 2_000_000_000
 LIGHTING_MESSAGE = "ID3F5VCFRONT_lighting"
-CONTEXT_SERVICES = ("selfdriveStateSP", "modelV2", "navLaneIntentSP")
+CONTEXT_SERVICES = ("selfdriveStateSP", "modelV2", "navLaneIntentSP", "modelDataV2SP")
 
 
 def longitudinal_context(sm, now: float) -> tuple[int, bool, bool, float, bool, bool, bool, float, bool, float, bool]:
@@ -191,6 +191,15 @@ class TeslaCardAdapter:
     intent = self.sm[service]
     direction = str(intent.direction) if fresh else "none"
     requested = bool(fresh and intent.valid and intent.signalRequested and direction in ("left", "right"))
+    # A confirmed road edge on the requested side must not be signalled
+    # automatically: fold it into "not requested" so the existing release path
+    # turns the lamp off (and no retry opens a new session).
+    if requested and self.sm.seen['modelDataV2SP'] and self.sm.valid['modelDataV2SP']:
+      mdv2sp = self.sm['modelDataV2SP']
+      edge_blocked = bool(mdv2sp.leftLaneChangeEdgeBlock if direction == "left"
+                          else mdv2sp.rightLaneChangeEdgeBlock)
+      if edge_blocked:
+        requested = False
     if not requested:
       if self._active_nav_signal_test_id is not None:
         self.validation.request_cancel(self._active_nav_signal_test_id, now_nanos)

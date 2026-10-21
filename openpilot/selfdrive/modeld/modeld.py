@@ -14,7 +14,7 @@ import threading
 import time
 import numpy as np
 import openpilot.cereal.messaging as messaging
-from openpilot.cereal import log
+from openpilot.cereal import log, custom
 from opendbc.car.structs import car
 from openpilot.cereal.messaging import PubMaster, SubMaster
 from openpilot.cereal.services import SERVICE_LIST
@@ -53,6 +53,9 @@ SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 LAT_SMOOTH_SECONDS = 0.0
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
+
+# Branch original turn intent: use the model action curvature.
+LOCAL_TURN_CURVATURE_OVERRIDE = False
 BIG_MODEL_TIMEOUT = C3XL_MODEL_LOAD_TIMEOUT
 
 
@@ -218,6 +221,38 @@ class ModelState(ModelStateBase):
       self.input_shapes, self.frame_skip, device=self.model_device, frame_copy_size=self.frame_copy_size)
     self.prev_desire[:] = 0
 
+# LOCAL OEM lane-change availability: Tesla DAS_status (0x39B) carries
+# DAS_autoLaneChangeState (start bit 46, 5 bits) - the car's own verdict on which
+# side may change lanes. Its vision already knows the lane type (solid/dashed/
+# road edge), so this is an extra veto source next to the visual boundary.
+# Explicit lane-type verdicts: always veto that side.
+OEM_ALC_EXPLICIT_LEFT_BLOCK = (21, 26)    # SOLID_LANE_LINE, BLOCKED_LANE_TYPE_L
+OEM_ALC_EXPLICIT_RIGHT_BLOCK = (21, 27)   # SOLID_LANE_LINE, BLOCKED_LANE_TYPE_R
+# Availability-only verdicts: veto that side only when vision cannot confirm a
+# crossable dashed boundary (the car's ALC availability is also gated by
+# speed/map and must not override clear vision).
+OEM_ALC_AVAIL_LEFT_BLOCK = (7, 9)         # ONLY_R, PROGRESS_R
+OEM_ALC_AVAIL_RIGHT_BLOCK = (6, 10)       # ONLY_L, PROGRESS_L
+CROSSABLE_MARKINGS = ('dashed', 'doubleDashed')
+
+
+def vision_crossable(topology, healthy, side):
+  """Vision confirms a dashed neighbour lane on this side."""
+  return bool(healthy and getattr(topology, 'validForControl', False)
+              and getattr(topology, side + 'EvidenceValid', False)
+              and str(getattr(topology, side + 'EgoSideMarking')) in CROSSABLE_MARKINGS
+              and getattr(topology, side + 'NeighborExists', False))
+
+
+def oem_das_alc_state(events):
+  """Last DAS_autoLaneChangeState in this batch, or None when absent."""
+  state = None
+  for evt in events:
+    for f in evt.can:
+      if f.address == 0x39B:
+        state = (int.from_bytes(bytes(f.dat), 'little') >> 46) & 0x1F
+  return state
+
 
 def main(demo=False):
   cloudlog.warning("modeld init")
@@ -339,6 +374,10 @@ def main(demo=False):
   DH = DesireHelper()
   RELC = RoadEdgeLaneChangeController()
   LINE_BLOCKER = LaneChangeBoundaryBlocker()
+  # conflate: DAS_status (0x39B) is ~2 Hz, so the latest CAN batch is enough
+  # and this keeps the per-frame parse cost near zero.
+  oem_can_sock = messaging.sub_sock('can', conflate=True)
+  oem_alc_state = -1
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -452,6 +491,23 @@ def main(demo=False):
       posenet_send = messaging.new_message('cameraOdometry')
 
       action = get_action_from_model(model_output, prev_action, lat_action_t, long_action_t, v_ego)
+      # LOCAL: while a turn intent is active, drive the curvature of the model's
+      # published plan instead of its action output. Measured on this car, the
+      # action curvature is 1.3-1.8x wider than the plan at turn intents, which
+      # makes the car drift toward the middle of the road.
+      if LOCAL_TURN_CURVATURE_OVERRIDE and DH.lane_turn_direction != custom.ModelDataV2SP.TurnDirection.none and sm['carControl'].latActive:
+        plan = model_output['plan'][0]
+        turn_curvature = get_curvature_from_plan(
+          plan[:, Plan.T_FROM_CURRENT_EULER][:, 2], plan[:, Plan.ORIENTATION_RATE][:, 2],
+          ModelConstants.T_IDXS, v_ego, lat_action_t,
+        )
+        if v_ego > MIN_LAT_CONTROL_SPEED:
+          turn_curvature = smooth_value(float(turn_curvature), prev_action.desiredCurvature, LAT_SMOOTH_SECONDS)
+        else:
+          turn_curvature = prev_action.desiredCurvature
+        action = log.ModelDataV2.Action(desiredCurvature=float(turn_curvature),
+                                        desiredAcceleration=float(action.desiredAcceleration),
+                                        shouldStop=bool(action.shouldStop))
       prev_action = action
       fill_model_msg(modelv2_send, model_output, action,
                      publish_state, meta_main.frame_id, meta_extra.frame_id, frame_id,
@@ -468,19 +524,36 @@ def main(demo=False):
       nav_lane_intent = sm['navLaneIntentSP'] if (
         sm.seen['navLaneIntentSP'] and sm.alive['navLaneIntentSP'] and sm.valid['navLaneIntentSP']
       ) else None
+      # LOCAL: topology health is about the lane topology itself, not about a
+      # navigation lane request. The old definition required a nav request, which
+      # made every visual boundary veto inert whenever navigation was idle.
       lane_topology_healthy = bool(
-        nav_lane_intent is not None and nav_lane_intent.valid and nav_lane_intent.signalRequested and
-        sm.seen['laneTopologyStateSP'] and sm.alive['laneTopologyStateSP'] and sm.valid['laneTopologyStateSP']
+        sm.seen['laneTopologyStateSP'] and sm.alive['laneTopologyStateSP'] and sm.valid['laneTopologyStateSP'] and
+        bool(sm['laneTopologyStateSP'].validForControl)
       )
       left_unknown, left_ignore_solid = nav_lane_crossing_policy(nav_lane_intent, "left")
       right_unknown, right_ignore_solid = nav_lane_crossing_policy(nav_lane_intent, "right")
-      if not (nav_lane_intent is not None and nav_lane_intent.valid and nav_lane_intent.signalRequested):
-        LINE_BLOCKER.reset()
+      # LOCAL: keep the boundary memory across frames without a navigation
+      # request, so a confirmed solid line actually vetoes the lane change.
       left_line_blocked, right_line_blocked = LINE_BLOCKER.update(
         sm['laneTopologyStateSP'], healthy=lane_topology_healthy,
         ignore_left_solid=left_ignore_solid,
         ignore_right_solid=right_ignore_solid,
       )
+      # LOCAL: fold the car's own lane-change verdict into the boundary vetoes.
+      new_alc = oem_das_alc_state(messaging.drain_sock(oem_can_sock, wait_for_one=False))
+      if new_alc is not None:
+        oem_alc_state = new_alc
+      if oem_alc_state in OEM_ALC_EXPLICIT_LEFT_BLOCK:
+        left_line_blocked = True
+      if oem_alc_state in OEM_ALC_EXPLICIT_RIGHT_BLOCK:
+        right_line_blocked = True
+      if oem_alc_state in OEM_ALC_AVAIL_LEFT_BLOCK and not vision_crossable(
+          sm['laneTopologyStateSP'], lane_topology_healthy, 'left'):
+        left_line_blocked = True
+      if oem_alc_state in OEM_ALC_AVAIL_RIGHT_BLOCK and not vision_crossable(
+          sm['laneTopologyStateSP'], lane_topology_healthy, 'right'):
+        right_line_blocked = True
       topology = sm['laneTopologyStateSP']
       left_crossing_allowed = lane_topology_nav_crossing_allowed(
         topology, side="left", healthy=lane_topology_healthy,

@@ -175,7 +175,21 @@ class DesireHelper:
       elif self.lane_change_state == LaneChangeState.laneChangeStarting:
         self.lane_change_timer += DT_MDL
 
-        if lane_change_prob < 0.02 and self.lane_change_timer >= LANE_CHANGE_START_TIME:
+        # LOCAL: a lane change already in progress must respect the same boundary
+        # vetoes as its initiation. If the side we are moving into becomes a
+        # confirmed solid / road edge (or a blindspot appears), cancel instead of
+        # crossing it. Cancelling means: state off, no direction, timer reset.
+        side_blocked = False
+        if self.lane_change_direction == LaneChangeDirection.left:
+          side_blocked = carstate.leftBlindspot or left_edge_detected or left_line_blocked
+        elif self.lane_change_direction == LaneChangeDirection.right:
+          side_blocked = carstate.rightBlindspot or right_edge_detected or right_line_blocked
+
+        if side_blocked:
+          self.lane_change_state = LaneChangeState.off
+          self.lane_change_direction = LaneChangeDirection.none
+          self.lane_change_timer = 0.0
+        elif lane_change_prob < 0.02 and self.lane_change_timer >= LANE_CHANGE_START_TIME:
           self.lane_change_timer = 0.0
           if one_blinker:
             self.lane_change_state = LaneChangeState.preLaneChange

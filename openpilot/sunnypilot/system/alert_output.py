@@ -24,6 +24,7 @@ class Beepd:
     self.beep_lock = threading.Lock()
     self.gpio_fd = None
     self.beep_queue: queue.Queue = queue.Queue(maxsize=8)
+    self.lane_change_prev = None
     self.worker = threading.Thread(target=self._worker, daemon=True)
     self.worker.start()
     # Never probe an unknown device's GPIO. The manager parameter is only an
@@ -133,6 +134,35 @@ class Beepd:
     if sm.updated['selfdriveStateSP']:
       self.update_mads(bool(sm['selfdriveStateSP'].mads.enabled))
 
+    if sm.updated['modelV2']:
+      self.update_lane_change_buzzer(sm)
+
+  def update_lane_change_buzzer(self, sm) -> None:
+    """Short buzz only when the car starts a lane change on its own.
+
+    A navigation-requested signal is the fully automatic path: the adapter turns
+    the lamp on without driver input, and the intent is what asks for the lane.
+    A driver-blinker lane change stays silent.
+    """
+    if not bool(sm['carControl'].latActive):
+      self.lane_change_prev = None
+      return
+    meta = sm['modelV2'].meta
+    state = int(getattr(meta.laneChangeState, 'raw', 0))
+    direction = int(getattr(meta.laneChangeDirection, 'raw', 0))
+    nav = sm['navLaneIntentSP'] if sm.all_checks(['navLaneIntentSP']) else None
+    nav_requested = bool(
+      nav is not None and nav.valid and nav.signalRequested and
+      str(nav.direction) == ('left' if direction == 1 else 'right')
+    )
+    active = bool(state in (2, 3) and direction in (1, 2) and nav_requested)
+    if self.lane_change_prev is None:
+      self.lane_change_prev = active
+      return
+    if active and not self.lane_change_prev:
+      self.dispatch_beep(self.engage)
+    self.lane_change_prev = active
+
   def update_mads(self, enabled):
     if self.mads_enabled is None:
       self.mads_enabled = enabled
@@ -167,7 +197,8 @@ class Beepd:
     if test:
       threading.Thread(target=self.test_beepd_thread, daemon=True).start()
 
-    sm = messaging.SubMaster(['selfdriveState', 'selfdriveStateSP'])
+    sm = messaging.SubMaster(['selfdriveState', 'selfdriveStateSP', 'modelV2',
+                              'carControl', 'navLaneIntentSP'])
     rk = Ratekeeper(20)
 
     while True:
