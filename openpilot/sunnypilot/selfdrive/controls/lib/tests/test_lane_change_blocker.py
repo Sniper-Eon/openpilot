@@ -42,17 +42,29 @@ def test_unhealthy_or_observation_only_topology_is_not_used_as_a_global_block():
   assert lane_topology_change_blocks(topology(left="solid", right="solid"), healthy=True) == (False, False)
 
 
-def test_confirmed_solid_has_a_bounded_clear_grace_through_unknown_evidence():
-  blocker = LaneChangeBoundaryBlocker(clear_frames=3)
+def test_confirmed_solid_is_held_while_the_road_is_still_observed():
+  blocker = LaneChangeBoundaryBlocker(clear_frames=3, confirm_frames=1)
 
   assert blocker.update(topology(left="solid", left_valid=True), healthy=True) == (True, False)
+  # Observation-only frames still see the road: the hold is intentionally sticky,
+  # so an occluded construction solid cannot be crossed by losing evidence.
   assert blocker.update(topology(control_valid=False), healthy=True) == (True, False)
   assert blocker.update(topology(control_valid=False), healthy=True) == (True, False)
-  assert blocker.update(topology(control_valid=False), healthy=True) == (False, False)
+  assert blocker.update(topology(control_valid=False), healthy=True) == (True, False)
+
+
+def test_hold_is_released_when_the_topology_itself_disappears():
+  blocker = LaneChangeBoundaryBlocker(clear_frames=3, confirm_frames=1)
+
+  assert blocker.update(topology(left="solid", left_valid=True), healthy=True) == (True, False)
+  # No topology at all must not veto forever: the grace bounds the hold.
+  assert blocker.update(topology(), healthy=False) == (True, False)
+  assert blocker.update(topology(), healthy=False) == (True, False)
+  assert blocker.update(topology(), healthy=False) == (False, False)
 
 
 def test_solid_clear_grace_is_independent_per_side_and_does_not_latch_unknown_forever():
-  blocker = LaneChangeBoundaryBlocker(clear_frames=2)
+  blocker = LaneChangeBoundaryBlocker(clear_frames=2, confirm_frames=1)
 
   assert blocker.update(topology(right="solid", right_valid=True), healthy=True) == (False, True)
   assert blocker.update(topology(), healthy=False) == (False, True)
@@ -74,7 +86,7 @@ def test_fork_policy_allows_unknown_or_solid_but_never_stale_geometry_or_road_ed
 
 
 def test_fork_policy_clears_a_solid_hold_but_not_a_road_edge_hold():
-  blocker = LaneChangeBoundaryBlocker(clear_frames=3)
+  blocker = LaneChangeBoundaryBlocker(clear_frames=3, confirm_frames=1)
   assert blocker.update(topology(left="solid", left_valid=True), healthy=True) == (True, False)
   assert blocker.update(topology(), healthy=True, ignore_left_solid=True) == (False, False)
 
@@ -100,3 +112,24 @@ def test_model_policy_accepts_ordinary_unknown_without_applying_it_to_turn_only_
   intent.targetLaneIndex = 0
   intent.valid = False
   assert nav_lane_crossing_policy(intent, "left") == (False, False)
+
+def test_boundary_needs_consecutive_frames_before_it_vetoes():
+  blocker = LaneChangeBoundaryBlocker(clear_frames=6, confirm_frames=2)
+
+  # A single frame of solid paint is noise: it must not veto yet.
+  assert blocker.update(topology(left="solid", left_valid=True), healthy=True) == (False, False)
+  # The same side reported again on the next frame confirms the boundary.
+  assert blocker.update(topology(left="solid", left_valid=True), healthy=True) == (True, False)
+  # One crossable frame is not enough to clear a held boundary either.
+  assert blocker.update(topology(left="dashed", left_valid=True), healthy=True) == (True, False)
+
+
+def test_boundary_confirmation_restarts_when_the_side_flips():
+  blocker = LaneChangeBoundaryBlocker(clear_frames=6, confirm_frames=2)
+
+  assert blocker.update(topology(left="solid", left_valid=True), healthy=True) == (False, False)
+  # Right side appears: the left streak is irrelevant, right needs its own 2 frames.
+  assert blocker.update(topology(left="dashed", right="solid", left_valid=True, right_valid=True),
+                        healthy=True) == (False, False)
+  assert blocker.update(topology(left="dashed", right="solid", left_valid=True, right_valid=True),
+                        healthy=True) == (False, True)

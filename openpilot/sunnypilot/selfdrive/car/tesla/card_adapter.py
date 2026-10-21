@@ -194,8 +194,14 @@ class TeslaCardAdapter:
     # A confirmed road edge on the requested side must not be signalled
     # automatically: fold it into "not requested" so the existing release path
     # turns the lamp off (and no retry opens a new session).
-    if requested and self.sm.seen['modelDataV2SP'] and self.sm.valid['modelDataV2SP']:
-      mdv2sp = self.sm['modelDataV2SP']
+    mdv2sp = None
+    if requested:
+      try:
+        if self.sm.seen.get('modelDataV2SP') and self.sm.valid.get('modelDataV2SP'):
+          mdv2sp = self.sm['modelDataV2SP']
+      except (KeyError, AttributeError, TypeError):
+        mdv2sp = None
+    if mdv2sp is not None:
       edge_blocked = bool(mdv2sp.leftLaneChangeEdgeBlock if direction == "left"
                           else mdv2sp.rightLaneChangeEdgeBlock)
       if edge_blocked:

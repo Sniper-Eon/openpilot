@@ -40,6 +40,7 @@ class FakeSubMaster:
         valid=False, signalRequested=False, direction="none", sessionId="", routeRevision=0, requestId=0,
       ),
       "modelV2": SimpleNamespace(meta=SimpleNamespace(laneChangeState=SimpleNamespace(raw=0), laneChangeDirection=SimpleNamespace(raw=0))),
+      "modelDataV2SP": SimpleNamespace(leftLaneChangeEdgeBlock=False, rightLaneChangeEdgeBlock=False),
     }
     self.recv_time = dict.fromkeys(self.data, now)
     self.seen = dict.fromkeys(self.data, True)
