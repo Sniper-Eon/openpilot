@@ -12,6 +12,7 @@ os.environ['GMMU'] = '0'
 from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.selfdrive.modeld.helpers import chestnut_present, load_oob
 from openpilot.sunnypilot import jetlink_adapter
+from openpilot.sunnypilot.selfdrive.car.tesla.oem_lane_signals import OemLaneSignals
 from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT, configure_default_device, load_with_timeout
 from openpilot.sunnypilot.hardware.profile import HardwareProfile, get_hardware_profile
 configure_default_device(COMMA_HARDWARE, c3xl=get_hardware_profile() == HardwareProfile.C3XL)
@@ -398,14 +399,9 @@ class ModelState(ModelStateBase):
 # DAS_autoLaneChangeState (start bit 46, 5 bits) - the car's own verdict on which
 # side may change lanes. Its vision already knows the lane type (solid/dashed/
 # road edge), so this is an extra veto source next to the visual boundary.
-# Explicit lane-type verdicts: always veto that side.
-OEM_ALC_EXPLICIT_LEFT_BLOCK = (21, 26)    # SOLID_LANE_LINE, BLOCKED_LANE_TYPE_L
-OEM_ALC_EXPLICIT_RIGHT_BLOCK = (21, 27)   # SOLID_LANE_LINE, BLOCKED_LANE_TYPE_R
-# Availability-only verdicts: veto that side only when vision cannot confirm a
-# crossable dashed boundary (the car's ALC availability is also gated by
-# speed/map and must not override clear vision).
-OEM_ALC_AVAIL_LEFT_BLOCK = (7, 9)         # ONLY_R, PROGRESS_R
-OEM_ALC_AVAIL_RIGHT_BLOCK = (6, 10)       # ONLY_L, PROGRESS_L
+# Tesla factory lane-recognition signals (0x39B verdicts, 0x238 map rejects).
+# This platform does not broadcast the raw per-line model (DAS_lanes/0x239), so
+# the DAS verdict is what we consume; see oem_lane_signals.py for the mapping.
 CROSSABLE_MARKINGS = ('dashed', 'doubleDashed')
 
 
@@ -415,16 +411,6 @@ def vision_crossable(topology, healthy, side):
               and getattr(topology, side + 'EvidenceValid', False)
               and str(getattr(topology, side + 'EgoSideMarking')) in CROSSABLE_MARKINGS
               and getattr(topology, side + 'NeighborExists', False))
-
-
-def oem_das_alc_state(events):
-  """Last DAS_autoLaneChangeState in this batch, or None when absent."""
-  state = None
-  for evt in events:
-    for f in evt.can:
-      if f.address == 0x39B:
-        state = (int.from_bytes(bytes(f.dat), 'little') >> 46) & 0x1F
-  return state
 
 
 def main(demo=False):
@@ -537,7 +523,7 @@ def main(demo=False):
   # conflate: DAS_status (0x39B) is ~2 Hz, so the latest CAN batch is enough
   # and this keeps the per-frame parse cost near zero.
   oem_can_sock = messaging.sub_sock('can', conflate=True)
-  oem_alc_state = -1
+  oem_lane = OemLaneSignals()
 
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
@@ -727,17 +713,15 @@ def main(demo=False):
         ignore_right_solid=right_ignore_solid,
       )
       # LOCAL: fold the car's own lane-change verdict into the boundary vetoes.
-      new_alc = oem_das_alc_state(messaging.drain_sock(oem_can_sock, wait_for_one=False))
-      if new_alc is not None:
-        oem_alc_state = new_alc
-      if oem_alc_state in OEM_ALC_EXPLICIT_LEFT_BLOCK:
+      oem_lane.update(messaging.drain_sock(oem_can_sock, wait_for_one=False))
+      if oem_lane.left_explicit_block:
         left_line_blocked = True
-      if oem_alc_state in OEM_ALC_EXPLICIT_RIGHT_BLOCK:
+      if oem_lane.right_explicit_block:
         right_line_blocked = True
-      if oem_alc_state in OEM_ALC_AVAIL_LEFT_BLOCK and not vision_crossable(
+      if oem_lane.left_availability_block and not vision_crossable(
           sm['laneTopologyStateSP'], lane_topology_healthy, 'left'):
         left_line_blocked = True
-      if oem_alc_state in OEM_ALC_AVAIL_RIGHT_BLOCK and not vision_crossable(
+      if oem_lane.right_availability_block and not vision_crossable(
           sm['laneTopologyStateSP'], lane_topology_healthy, 'right'):
         right_line_blocked = True
       topology = sm['laneTopologyStateSP']
