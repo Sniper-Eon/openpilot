@@ -121,12 +121,19 @@ def update_lane_position(sm, current, now_ns: int, state: dict) -> None:
   car_ok = bool(sm.seen["carState"] and sm.alive["carState"] and sm.valid["carState"])
   speed = float(sm["carState"].vEgo) if car_ok else 0.0
   position = lane_position_estimate(sm, current, now_ns)
-  valid = bool(position.get("valid") is True and speed >= LANE_POSITION_MIN_SPEED_MPS)
-  if valid:
+  candidate = position.get("lane_index_from_left")
+  estimate_valid = bool(position.get("valid") is True and speed >= LANE_POSITION_MIN_SPEED_MPS)
+  if estimate_valid and type(candidate) is int:
+    # A different candidate lane number restarts the confirmation count.
+    if state.get("candidate_index") != candidate:
+      state["candidate_index"] = candidate
+      state["stable"] = 0
     state["stable"] = min(int(state["stable"]) + 1, 99)
     state["last_valid_ns"] = now_ns
   else:
     state["stable"] = 0
+    state["candidate_index"] = None
+  valid = bool(estimate_valid and int(state["stable"]) >= LANE_POSITION_STABLE_FRAMES)
   holdable = position.get("reason") in HOLDABLE_REASONS
   if not valid and holdable and state["last_valid_ns"] and \
       now_ns - int(state["last_valid_ns"]) <= LANE_POSITION_HOLD_NS:
@@ -205,7 +212,7 @@ def main() -> None:
     sm = messaging.SubMaster(["liveLocationKalman", "laneTopologyStateSP", "carState"])
     ratekeeper = Ratekeeper(PUBLISH_HZ)
     next_maintenance_ns = 0
-    lane_position_state = {"stable": 0, "last_valid_ns": 0, "last_write_ns": 0}
+    lane_position_state = {"stable": 0, "last_valid_ns": 0, "last_write_ns": 0, "candidate_index": None}
     while True:
       sm.update(0)
       now_ns = time.monotonic_ns()

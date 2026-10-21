@@ -113,7 +113,15 @@ class LaneChangeBoundaryBlocker:
         crossable = (healthy and bool(topology.validForControl)
                      and bool(getattr(topology, prefix + "EvidenceValid"))
                      and str(getattr(topology, prefix + "EgoSideMarking")) in CROSSABLE_EGO_MARKINGS)
-        self._remaining[side] = self._remaining[side] - 1 if crossable else self.clear_frames
+        if crossable:
+          # Positive visual evidence releases the hold after the grace.
+          self._remaining[side] = self._remaining[side] - 1
+        elif not healthy:
+          # No topology at all: do not keep vetoing forever on missing data.
+          self._remaining[side] = self._remaining[side] - 1
+        else:
+          # Observation-only frame: the road is still visible, keep the hold.
+          self._remaining[side] = self.clear_frames
         if self._remaining[side] == 0:
           self._held_markings[side] = "unknown"
       blocked[side] = (confirmed or self._remaining[side] > 0) and not (

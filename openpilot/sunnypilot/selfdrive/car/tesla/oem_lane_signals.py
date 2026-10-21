@@ -35,6 +35,8 @@ CAN messages arrive at 2 Hz while the consumer runs at 20 Hz.
 
 from __future__ import annotations
 
+import time
+
 # ---------------------------------------------------------------------------
 # DAS_autoLaneChangeState (0x39B / 0x399, start bit 46, 5 bits)
 # ---------------------------------------------------------------------------
@@ -129,6 +131,12 @@ ADDRESS_DAS_STATUS = 0x39B
 ADDRESS_DAS_STATUS_CH = 0x399
 ADDRESS_UI_MAP_DATA = 0x238
 
+# Both messages are about 2 Hz on the cars measured here. A veto that outlives
+# its message is worse than no veto, so each signal expires on its own.
+ALC_STALE_NS = 500_000_000
+MAP_STALE_NS = 1_000_000_000
+FRAME_BYTES = 8
+
 
 def _le_bits(data: bytes, start: int, length: int) -> int:
   """Little-endian (Intel) DBC extraction."""
@@ -149,57 +157,88 @@ class OemLaneSignals:
     self.nav_route_active: bool = False
     self.seen_alc: bool = False
     self.seen_map: bool = False
+    self._alc_ns: int = -1
+    self._alc_ch_ns: int = -1
+    self._map_ns: int = -1
 
   # -- ingestion -----------------------------------------------------------
-  def update(self, events) -> None:
-    """Consume messaging events (anything with a ``can`` frame list)."""
+  def update(self, events, now_ns: int | None = None) -> None:
+    """Consume messaging events (anything with a ``can`` frame list).
+
+    ``now_ns`` exists for tests and replay; production uses the monotonic clock.
+    Frames with an unexpected length are ignored, and every accepted frame
+    refreshes the age of the signal it carried.
+    """
+    now = time.monotonic_ns() if now_ns is None else int(now_ns)
     for evt in events:
       for frame in evt.can:
         address = frame.address
+        data = bytes(frame.dat)
+        if len(data) != FRAME_BYTES:
+          continue
         if address == ADDRESS_DAS_STATUS:
-          data = bytes(frame.dat)
           self.alc_state = _le_bits(data, 46, 5)
           self.ldw = _le_bits(data, 37, 3)
+          self._alc_ns = now
           self.seen_alc = True
         elif address == ADDRESS_DAS_STATUS_CH:
-          self.alc_state_ch = _le_bits(bytes(frame.dat), 46, 5)
+          self.alc_state_ch = _le_bits(data, 46, 5)
+          self._alc_ch_ns = now
         elif address == ADDRESS_UI_MAP_DATA:
-          data = bytes(frame.dat)
           self.reject_left_lane = bool(_le_bits(data, 40, 1))
           self.reject_right_lane = bool(_le_bits(data, 41, 1))
           self.reject_left_free_space = bool(_le_bits(data, 44, 1))
           self.reject_right_free_space = bool(_le_bits(data, 45, 1))
           self.nav_route_active = bool(_le_bits(data, 29, 1))
+          self._map_ns = now
           self.seen_map = True
+
+  @staticmethod
+  def _fresh(stamp_ns: int, limit_ns: int, now_ns: int | None = None) -> bool:
+    if stamp_ns < 0:
+      return False
+    now = time.monotonic_ns() if now_ns is None else int(now_ns)
+    return 0 <= now - stamp_ns <= limit_ns
+
+  @property
+  def alc_fresh(self) -> bool:
+    return self._fresh(self._alc_ns, ALC_STALE_NS)
+
+  @property
+  def map_fresh(self) -> bool:
+    return self._fresh(self._map_ns, MAP_STALE_NS)
 
   # -- verdicts ------------------------------------------------------------
   @property
   def left_explicit_block(self) -> bool:
     """Car's own lane-type/solid-line (or map) verdict forbids a left change."""
-    return bool(self.alc_state in ALC_EXPLICIT_LEFT_BLOCK
-                or self.reject_left_lane or self.reject_left_free_space)
+    if self.alc_fresh and self.alc_state in ALC_EXPLICIT_LEFT_BLOCK:
+      return True
+    return bool(self.map_fresh and (self.reject_left_lane or self.reject_left_free_space))
 
   @property
   def right_explicit_block(self) -> bool:
-    return bool(self.alc_state in ALC_EXPLICIT_RIGHT_BLOCK
-                or self.reject_right_lane or self.reject_right_free_space)
+    if self.alc_fresh and self.alc_state in ALC_EXPLICIT_RIGHT_BLOCK:
+      return True
+    return bool(self.map_fresh and (self.reject_right_lane or self.reject_right_free_space))
 
   @property
   def left_availability_block(self) -> bool:
     """Auto lane change is not available on the left (may be speed/map gated)."""
-    return self.alc_state in ALC_AVAIL_LEFT_BLOCK
+    return bool(self.alc_fresh and self.alc_state in ALC_AVAIL_LEFT_BLOCK)
 
   @property
   def right_availability_block(self) -> bool:
-    return self.alc_state in ALC_AVAIL_RIGHT_BLOCK
+    return bool(self.alc_fresh and self.alc_state in ALC_AVAIL_RIGHT_BLOCK)
 
   @property
   def solid_line(self) -> bool:
-    return self.alc_state == ALC_UNAVAILABLE_SOLID_LANE_LINE
+    return bool(self.alc_fresh and self.alc_state == ALC_UNAVAILABLE_SOLID_LANE_LINE)
 
   def describe(self) -> str:
     alc = ALC_NAMES.get(self.alc_state, f'UNKNOWN({self.alc_state})')
-    return (f'alc={alc} alc_ch={self.alc_state_ch} ldw={self.ldw} '
+    fresh = '' if self.alc_fresh else ' (stale)'
+    return (f'alc={alc}{fresh} alc_ch={self.alc_state_ch} ldw={self.ldw} '
             f'map(L={self.reject_left_lane},R={self.reject_right_lane},'
             f'freeL={self.reject_left_free_space},freeR={self.reject_right_free_space},'
             f'nav={self.nav_route_active})')
@@ -246,4 +285,17 @@ if __name__ == '__main__':
   sig.update([_Event([_Frame(0x238, bytes((raw >> (8 * i)) & 0xFF for i in range(8)))])])
   print(f'  {"OK" if sig.reject_right_lane and not sig.reject_left_lane and sig.nav_route_active else "FAIL"}'
         f'  0x238 right reject + nav: {sig.describe()}')
-  print('self test:', 'PASS' if ok else 'FAIL')
+  # Staleness: an old verdict must stop vetoing once its message stops arriving.
+  sig = OemLaneSignals()
+  stale_ok = False
+  sig.update([_Event([frame(0x39B, ALC_UNAVAILABLE_SOLID_LANE_LINE, 46, 5)])], now_ns=time.monotonic_ns() - 5_000_000_000)
+  stale_ok = not sig.left_explicit_block and not sig.right_explicit_block
+  print(f'  {"OK" if stale_ok else "FAIL"}  过期 solid 不再否决: {sig.describe()}')
+  sig.update([_Event([frame(0x39B, ALC_UNAVAILABLE_SOLID_LANE_LINE, 46, 5)])])
+  fresh_ok = sig.left_explicit_block and sig.right_explicit_block
+  print(f'  {"OK" if fresh_ok else "FAIL"}  新 solid 仍然否决: {sig.describe()}')
+  bad_frame = _Frame(0x39B, b'\x00')
+  sig.update([_Event([bad_frame])])
+  len_ok = sig.left_explicit_block  # short frame ignored, last fresh value kept
+  print(f'  {"OK" if len_ok else "FAIL"}  短帧被忽略: {sig.describe()}')
+  print('self test:', 'PASS' if (ok and stale_ok and fresh_ok and len_ok) else 'FAIL')

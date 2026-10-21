@@ -194,8 +194,10 @@ def navigation_display_from_service(
     return NavigationOverlayDisplay("导航已过期", "等待手机更新路线", "当前没有有效指引", receiving=True, warning=True)
   if reject_reason == "guidanceStale":
     # Lane guidance can expire after the prompt zone while the route is still
-    # live; that is not a whole-navigation expiry.
-    reject_reason = "none"
+    # live. That is not a whole-navigation expiry, but the expired maneuver and
+    # distance must never be presented as the current instruction.
+    return NavigationOverlayDisplay("导航指令已过期", "等待手机更新路线", "上一次有效指引暂不显示",
+                                    receiving=True, warning=True)
   if not bool(nav.routeActive):
     return NavigationOverlayDisplay("等待开始导航", "在手机上选择目的地", "手机已连接", receiving=True)
   if not bool(nav.routeMatched):
