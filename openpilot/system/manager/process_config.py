@@ -111,7 +111,7 @@ def use_copyparty(started, params, CP: car.CarParams) -> bool:
   return bool(params.get_bool("EnableCopyparty"))
 
 def use_device_console(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return not PC
+  return False
 
 def use_external_buzzer(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not PC and get_hardware_profile() == HardwareProfile.C3XL
@@ -255,7 +255,6 @@ procs = [
   PythonProcess("joystick", "openpilot.tools.joystick.joystick_control", and_(joystick, iscar)),
 
   # sunnylink <3
-  DaemonProcess("manage_sunnylinkd", "openpilot.sunnypilot.sunnylink.athena.manage_sunnylinkd", "SunnylinkdPid"),
   PythonProcess("sunnylink_registration_manager", "openpilot.sunnypilot.sunnylink.registration_manager", sunnylink_need_register_shim),
   PythonProcess("statsd_sp", "openpilot.sunnypilot.sunnylink.statsd", and_(always_run, sunnylink_ready_shim)),
 ]

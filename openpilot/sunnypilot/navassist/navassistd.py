@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 import threading
 import time
 
@@ -16,6 +18,7 @@ from openpilot.sunnypilot.navassist.publisher import build_nav_assist_message
 from openpilot.sunnypilot.navassist.server import NavAssistHTTPServer
 from openpilot.sunnypilot.navassist.udp_receiver import NavAssistUDPServer, UDP_SNAPSHOT_PORT
 from openpilot.sunnypilot.navassist.diagnostics import ingress_status_path
+from openpilot.sunnypilot.navassist.lane_position import estimate_ego_lane
 from openpilot.sunnypilot.navassist.settings import atomic_json
 
 
@@ -26,6 +29,116 @@ LOCALIZATION_MAX_AGE_NS = 500_000_000
 LOCAL_POSITION_MAX_STD_M = 10.0
 REPLAY_CHECKPOINT_PATH = "/dev/shm/navassist_replay_state.json"
 MAINTENANCE_REFRESH_NS = 1_000_000_000
+LANE_TOPOLOGY_MAX_AGE_NS = 150_000_000
+LANE_ANCHOR_PATH = Path("/dev/shm/lane_anchor_state.json")
+LANE_POSITION_PATH = Path("/dev/shm/road_lane_position.json")
+LANE_POSITION_HOLD_NS = 1_000_000_000
+LANE_POSITION_WRITE_NS = 100_000_000
+LANE_POSITION_MIN_SPEED_MPS = 1.0
+LANE_POSITION_STABLE_FRAMES = 3
+HOLDABLE_REASONS = frozenset(("noSameDirectionAnchor", "amapLaneCountUnknown", "topologyUnavailable", "visibleGeometryInvalid"))
+
+
+LANE_COUNT_CACHE_MAX_NS = 60_000_000_000
+_lane_count_cache = {"indices": (), "total": None, "session": None, "route": None, "ns": 0}
+
+
+def cached_amap_lanes(snapshot, now_ns: int, *, update: bool = True):
+  """Reuse the last AMap lane set for 5s; route/session changes clear it."""
+  try:
+    lanes = tuple(int(lane.index) for lane in snapshot.lanes)
+    total = int(snapshot.lane_total_count)
+    session = str(snapshot.session_id)
+    route = int(snapshot.route_revision)
+  except (AttributeError, TypeError, ValueError):
+    return (), -1
+  if lanes and update:
+    _lane_count_cache.update(indices=lanes, total=total, session=session, route=route, ns=now_ns)
+    return lanes, total
+  if (_lane_count_cache["session"] == session and _lane_count_cache["route"] == route and
+      0 <= now_ns - int(_lane_count_cache["ns"]) <= LANE_COUNT_CACHE_MAX_NS):
+    return tuple(_lane_count_cache["indices"]), _lane_count_cache["total"]
+  return (), -1
+
+
+def read_lane_anchors(now_ns: int) -> dict:
+  try:
+    data = json.loads(LANE_ANCHOR_PATH.read_text())
+    if 0 <= now_ns - int(data.get("publish_mono_ns", 0)) <= LANE_TOPOLOGY_MAX_AGE_NS:
+      return data
+  except (OSError, ValueError, TypeError):
+    pass
+  return {}
+
+
+def lane_position_estimate(sm, current, now_ns: int) -> dict:
+  topology = sm["laneTopologyStateSP"]
+  anchors = read_lane_anchors(now_ns)
+  seen = bool(sm.seen["laneTopologyStateSP"] and sm.alive["laneTopologyStateSP"]
+              and sm.valid["laneTopologyStateSP"])
+  age_ns = now_ns - int(sm.logMonoTime["laneTopologyStateSP"])
+  fresh = bool(seen and 0 <= age_ns <= LANE_TOPOLOGY_MAX_AGE_NS)
+  valid = bool(fresh and topology.valid and not topology.stale and not topology.ambiguous)
+  nav_fresh = bool(current is not None and not current.is_stale(now_ns))
+  lanes, total = cached_amap_lanes(current.snapshot, now_ns, update=nav_fresh) if current is not None else ((), -1)
+  return estimate_ego_lane(
+    amap_lane_indices=lanes,
+    amap_total_count=total if 1 <= total <= 16 else None,
+    visible_lane_count=int(topology.visibleLaneCount) if seen else 0,
+    ego_visible_index=int(topology.egoLaneIndexFromLeft) if seen else -1,
+    lanes_left_same_direction=int(anchors.get("lanes_left_same_direction", -1)) if seen else -1,
+    lanes_right_same_direction=int(anchors.get("lanes_right_same_direction", -1)) if seen else -1,
+    left_anchor=str(anchors.get("left_anchor_source", "unknown")) if seen else "unknown",
+    right_anchor=str(anchors.get("right_anchor_source", "unknown")) if seen else "unknown",
+    topology_fresh=fresh,
+    topology_valid=valid,
+  ).to_dict()
+
+
+def write_lane_position(*, valid: bool, position: dict, current, now_ns: int, stable_samples: int) -> None:
+  index = position.get("lane_index_from_left")
+  count = position.get("lane_count")
+  payload = {
+    "version": 1,
+    "valid": bool(valid),
+    "lane_index": int(index) + 1 if valid and type(index) is int else 0,
+    "lane_count": int(count) if valid and type(count) is int else None,
+    "numbering": "leftToRight",
+    "source": "commaCamera",
+    "absolute_confirmed": bool(valid),
+    "stable_samples": int(stable_samples),
+    "nav_session_id": str(current.snapshot.session_id) if current is not None else "",
+    "route_revision": int(current.snapshot.route_revision) if current is not None else 0,
+    "capture_mono_ns": int(now_ns),
+  }
+  try:
+    atomic_json(LANE_POSITION_PATH, payload)
+  except OSError:
+    pass
+
+
+def update_lane_position(sm, current, now_ns: int, state: dict) -> None:
+  car_ok = bool(sm.seen["carState"] and sm.alive["carState"] and sm.valid["carState"])
+  speed = float(sm["carState"].vEgo) if car_ok else 0.0
+  position = lane_position_estimate(sm, current, now_ns)
+  valid = bool(position.get("valid") is True and speed >= LANE_POSITION_MIN_SPEED_MPS)
+  if valid:
+    state["stable"] = min(int(state["stable"]) + 1, 99)
+    state["last_valid_ns"] = now_ns
+  else:
+    state["stable"] = 0
+  holdable = position.get("reason") in HOLDABLE_REASONS
+  if not valid and holdable and state["last_valid_ns"] and \
+      now_ns - int(state["last_valid_ns"]) <= LANE_POSITION_HOLD_NS:
+    # Leave the last valid file in place; position_feedback ages it out.
+    return
+  if now_ns - int(state["last_write_ns"]) < LANE_POSITION_WRITE_NS:
+    return
+  write_lane_position(valid=valid, position=position, current=current,
+                      now_ns=now_ns, stable_samples=int(state["stable"]))
+  state["last_write_ns"] = now_ns
+  if not valid:
+    state["last_valid_ns"] = 0
 
 
 def local_position_std_m(location) -> float:
@@ -89,9 +202,10 @@ def main() -> None:
     )
 
     pm = messaging.PubMaster(["navAssistStateSP"])
-    sm = messaging.SubMaster(["liveLocationKalman"])
+    sm = messaging.SubMaster(["liveLocationKalman", "laneTopologyStateSP", "carState"])
     ratekeeper = Ratekeeper(PUBLISH_HZ)
     next_maintenance_ns = 0
+    lane_position_state = {"stable": 0, "last_valid_ns": 0, "last_write_ns": 0}
     while True:
       sm.update(0)
       now_ns = time.monotonic_ns()
@@ -105,6 +219,7 @@ def main() -> None:
           atomic_json(ingress_status_path(), {'updated_mono_ns': now_ns, **udp_server.diagnostics()})
         except OSError:
           pass
+      update_lane_position(sm, store.current(), now_ns, lane_position_state)
       localization_valid = local_localization_valid(sm, now_ns)
       message = build_nav_assist_message(
         store.current(), now_ns, local_localization_valid=localization_valid,

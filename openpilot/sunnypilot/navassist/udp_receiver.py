@@ -88,9 +88,9 @@ class NavAssistUDPServer:
         if (len(body) <= 512 and set(query) == {'messageType', 'sessionId', 'sequence'} and
             current is not None and not self.store.is_stale() and self._accepted_source == source_host and
             query['sessionId'] == current.snapshot.session_id and
-            type(query['sequence']) is int and query['sequence'] == current.snapshot.sequence):
+            type(query['sequence']) is int and 0 <= int(current.snapshot.sequence) - int(query['sequence']) <= 5):
           ack = {'messageType': UDP_ACK_TYPE, 'schemaVersion': 3,
-                 'sessionId': current.snapshot.session_id, 'sequence': current.snapshot.sequence,
+                 'sessionId': current.snapshot.session_id, 'sequence': int(query['sequence']),
                  'lanePosition': lane_position_feedback(current.snapshot)}
           try:
             self._socket.sendto(json.dumps(ack, allow_nan=False, separators=(',', ':')).encode(), address)

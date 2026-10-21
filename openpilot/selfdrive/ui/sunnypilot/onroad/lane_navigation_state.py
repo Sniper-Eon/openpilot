@@ -188,8 +188,14 @@ def navigation_display_from_service(
     return NavigationOverlayDisplay("导航连接中断", "等待手机重新连接", "请保持 TesNav 运行", warning=True)
 
   reject_reason = str(nav.rejectReason)
-  if bool(nav.stale) or reject_reason in ("stale", "guidanceStale"):
+  if bool(nav.stale) or reject_reason == "stale":
+    if bool(nav.routeActive):
+      return NavigationOverlayDisplay("导航数据延迟", "等待手机更新路线", "上一次有效指引暂不显示", receiving=True, warning=True)
     return NavigationOverlayDisplay("导航已过期", "等待手机更新路线", "当前没有有效指引", receiving=True, warning=True)
+  if reject_reason == "guidanceStale":
+    # Lane guidance can expire after the prompt zone while the route is still
+    # live; that is not a whole-navigation expiry.
+    reject_reason = "none"
   if not bool(nav.routeActive):
     return NavigationOverlayDisplay("等待开始导航", "在手机上选择目的地", "手机已连接", receiving=True)
   if not bool(nav.routeMatched):

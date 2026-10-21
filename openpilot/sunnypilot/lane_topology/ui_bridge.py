@@ -6,7 +6,8 @@ from openpilot.sunnypilot.lane_topology.adapter import LaneTopologyFrame
 from openpilot.sunnypilot.lane_topology.metric_marking import measure_metric_marking, MetricMarkingEvidence, \
                                                                marking_sampling_parameters, \
                                                                project_model_lane_metric_samples, TemporalMarkingFilter
-from openpilot.sunnypilot.lane_topology.primary_model import find_ego_source_ids, PrimaryModelLaneTopologyAdapter
+from openpilot.sunnypilot.lane_topology.primary_model import apply_model_road_edges, find_ego_source_ids, \
+                                                               PrimaryModelLaneTopologyAdapter
 from openpilot.sunnypilot.lane_topology.tracker import LaneTopologyTracker
 from openpilot.sunnypilot.lane_topology.types import LaneBoundaryObservation, LaneMarkingType, LaneTopology
 
@@ -85,6 +86,9 @@ class LaneTopologyObserver:
           confidence=observation.confidence,
           visible=observation.visible,
         ) for observation in observations)
+      # modelV2's road-edge head is the live source for the roadEdge marking;
+      # the luma classifier only produces solid/dashed/unknown.
+      observations = apply_model_road_edges(observations, model_v2)
       self.current = self.tracker.update(observations, frame_id=frame_id, timestamp_ns=timestamp_ns)
       self.last_error = None
       return self.current

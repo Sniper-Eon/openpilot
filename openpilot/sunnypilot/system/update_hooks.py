@@ -5,7 +5,7 @@ from pathlib import Path
 
 CommandRunner = Callable[[list[str], str | Path], str]
 
-LOCAL_UPDATE_BRANCHES = ("dev-sp-egpu", "dev-sp-egpu-prebuild", "navassist-track-p0", "dev-sp-nav-prebuild")
+LOCAL_UPDATE_BRANCHES = ("navassist-track-p0", "dev-sp-nav-prebuild")
 LOCAL_UPDATE_URL = "https://github.com/onemiless/openpilot.git"
 
 

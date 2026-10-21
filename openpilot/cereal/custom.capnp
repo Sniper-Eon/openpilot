@@ -765,6 +765,17 @@ struct LaneTopologyStateSP @0x9ccdc8676701b412 {
   imageModelSkewMs @33 :Float32;
   leftEvidenceValid @34 :Bool;
   rightEvidenceValid @35 :Bool;
+  # Same-direction lane counts from the visible window's physical anchors.
+  lanesLeftSameDirection @36 :Int8 = -1;
+  lanesRightSameDirection @37 :Int8 = -1;
+  leftAnchorSource @38 :AnchorSource;
+  rightAnchorSource @39 :AnchorSource;
+
+  enum AnchorSource {
+    unknown @0;
+    roadEdge @1;
+    centerline @2;
+  }
 
   enum Marking {
     unknown @0;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable
+from dataclasses import replace
 import math
 from typing import Protocol
 
@@ -10,6 +11,13 @@ from openpilot.sunnypilot.lane_topology.types import LaneBoundaryObservation, La
 
 
 MarkingClassifier = Callable[[int, object], LaneMarkingType]
+
+# 2026-10-17 highway replay (7,007 ego frames): 0.8/1.5 raised the left anchor
+# from 8.7% to 53.7% and both-edge frames from 0.9% to 3.6% without labelling
+# edges that sit inside the lane.  1.0/1.5 added nothing over 0.8/1.5.
+ROAD_EDGE_MAX_STD = 0.8
+ROAD_EDGE_MAX_DELTA_M = 1.5
+ROAD_EDGE_SAMPLE_X_M = 15.0
 
 
 class LaneLineLike(Protocol):
@@ -118,3 +126,73 @@ class PrimaryModelLaneTopologyAdapter:
 
   def close(self) -> None:
     self.visibility.reset()
+
+
+def _line_y_at(line, x_m: float) -> float | None:
+  try:
+    xs = tuple(float(value) for value in line.x)
+    ys = tuple(float(value) for value in line.y)
+  except (AttributeError, TypeError, ValueError):
+    return None
+  if len(xs) != len(ys) or len(xs) < 2:
+    return None
+  points = tuple((x, y) for x, y in zip(xs, ys, strict=True) if math.isfinite(x) and math.isfinite(y))
+  if len(points) < 2:
+    return None
+  return interpolate_y(canonical_points(points), x_m)
+
+
+def apply_model_road_edges(observations: Iterable[LaneBoundaryObservation], model_v2: object, *,
+                           sample_x_m: float = ROAD_EDGE_SAMPLE_X_M,
+                           max_std: float = ROAD_EDGE_MAX_STD,
+                           max_delta_m: float = ROAD_EDGE_MAX_DELTA_M) -> tuple[LaneBoundaryObservation, ...]:
+  """Label an outermost lane line as a road edge from modelV2's own edge.
+
+  ``modelV2.roadEdges`` is an independent head trained for physical road
+  boundaries.  It is only used when its std is low and it lands on the
+  outermost visible lane line, so it cannot relabel an interior lane.  The
+  image classifier never emits ``roadEdge``; this is the live source for the
+  same-direction anchor.  Existing ``doubleSolid`` evidence is never
+  overwritten.
+  """
+  items = tuple(observations)
+  if not items:
+    return items
+  edges: list[float] = []
+  for edge, std in zip(getattr(model_v2, "roadEdges", ()), getattr(model_v2, "roadEdgeStds", ()), strict=False):
+    try:
+      value = float(std)
+    except (TypeError, ValueError):
+      continue
+    if not math.isfinite(value) or value > max_std:
+      continue
+    y = _line_y_at(edge, sample_x_m)
+    if y is not None:
+      # modelV2 uses right-positive y; lane topology uses left-positive y.
+      edges.append(-y)
+  if not edges:
+    return items
+
+  positioned: list[tuple[float, int]] = []
+  for index, observation in enumerate(items):
+    y = interpolate_y(canonical_points(observation.points), sample_x_m)
+    if y is not None:
+      positioned.append((y, index))
+  if not positioned:
+    return items
+  left_y, left_index = max(positioned)
+  right_y, right_index = min(positioned)
+
+  marked: set[int] = set()
+  for y in edges:
+    # The edge must lie outside the outermost line, never inside the lane.
+    if y > 0.0 and left_y <= y <= left_y + max_delta_m:
+      marked.add(left_index)
+    elif y < 0.0 and right_y - max_delta_m <= y <= right_y:
+      marked.add(right_index)
+  if not marked:
+    return items
+  rewritable = {LaneMarkingType.unknown, LaneMarkingType.solid, LaneMarkingType.dashed}
+  return tuple(replace(observation, marking_type=LaneMarkingType.roadEdge)
+               if index in marked and observation.marking_type in rewritable else observation
+               for index, observation in enumerate(items))

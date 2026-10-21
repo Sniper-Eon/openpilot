@@ -13,7 +13,7 @@ from openpilot.common.hardware import COMMA_HARDWARE
 from openpilot.selfdrive.modeld.helpers import chestnut_present, load_oob
 from openpilot.sunnypilot import jetlink_adapter
 from openpilot.sunnypilot.selfdrive.car.tesla.oem_lane_signals import OemLaneSignals
-from openpilot.sunnypilot.modeld_v2.egpu_loader import C3XL_MODEL_LOAD_TIMEOUT, configure_default_device, load_with_timeout
+from openpilot.sunnypilot.modeld_v2.c3xl_loader import C3XL_MODEL_LOAD_TIMEOUT, configure_default_device, load_with_timeout
 from openpilot.sunnypilot.hardware.profile import HardwareProfile, get_hardware_profile
 configure_default_device(COMMA_HARDWARE, c3xl=get_hardware_profile() == HardwareProfile.C3XL)
 import numpy as np

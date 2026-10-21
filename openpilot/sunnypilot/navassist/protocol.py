@@ -65,8 +65,8 @@ GUIDANCE_KEYS = frozenset((
   "maneuver", "maneuverDistanceM", "nextManeuver", "nextManeuverDistanceM", "currentRoad", "nextRoad",
   "roadClass", "roadType", "advisorySpeedMps", "observedAtMs",
 ))
-LANES_KEYS = frozenset(("observedAtMs", "items"))
-LANE_ITEM_KEYS = frozenset(("index", "allowedActions", "recommendedActions", "recommended"))
+LANES_KEYS = frozenset(("observedAtMs", "items", "totalCount"))
+LANE_ITEM_KEYS = frozenset(("index", "allowedActions", "recommendedActions", "recommended", "routeAvoid"))
 
 
 class NavAssistProtocolError(ValueError):
@@ -120,6 +120,7 @@ class NavAssistSnapshot:
   next_road: str
   lane_guidance_present: bool
   lane_guidance_observed_at_ms: int
+  lane_total_count: int
   lanes: tuple[LaneGuidance, ...]
 
 
@@ -274,7 +275,8 @@ def parse_snapshot(body: bytes) -> NavAssistSnapshot:
   location = _object(top.get("location", {}), "location", LOCATION_KEYS)
   guidance = _object(top.get("guidance", {}), "guidance", GUIDANCE_KEYS)
   lane_block = _object(top.get("lanes", {}), "lanes", LANES_KEYS)
-  lane_items = _required(lane_block, "items") if lane_guidance_present else []
+  lane_items = lane_block.get("items", []) if lane_guidance_present else []
+  lane_total_count = _optional_integer(lane_block, "totalCount", 1, MAX_LANES) if lane_guidance_present else -1
   if not isinstance(lane_items, list) or len(lane_items) > MAX_LANES:
     _reject("malformed", f"lanes.items must contain no more than {MAX_LANES} lanes")
 
@@ -347,6 +349,7 @@ def parse_snapshot(body: bytes) -> NavAssistSnapshot:
     next_road=_optional_road_name(guidance, "nextRoad"),
     lane_guidance_present=lane_guidance_present,
     lane_guidance_observed_at_ms=lane_observed_at_ms,
+    lane_total_count=lane_total_count,
     lanes=tuple(lanes),
   )
 
