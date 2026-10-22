@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import json
+from pathlib import Path
 
 from openpilot.cereal import messaging
 from openpilot.common.params import Params
@@ -13,6 +14,22 @@ from openpilot.sunnypilot.navassist.settings import SettingsCache, atomic_json
 
 SERVICES = ('navAssistStateSP', 'navLaneIntentSP', 'laneTopologyStateSP', 'modelV2', 'modelDataV2SP',
             'carState', 'carStateSP', 'carControl', 'controlsState', 'longitudinalPlanSP', 'deviceState')
+
+
+def read_lane_evidence(path: Path, *, mono_ns: int) -> dict:
+  """Record bounded lane files without changing any control inputs."""
+  try:
+    if path.stat().st_size > 4096:
+      return {"available": False, "error": "oversize"}
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+      return {"available": False, "error": "notObject"}
+    captured = data.get("capture_mono_ns", data.get("publish_mono_ns"))
+    return {"available": True,
+            "age_ms": (mono_ns - captured) / 1e6 if type(captured) is int else None,
+            "data": data}
+  except (OSError, ValueError, TypeError) as error:
+    return {"available": False, "error": type(error).__name__}
 
 
 def collect_sample(sm, *, wall_ms: int, mono_ns: int) -> dict:
@@ -53,7 +70,11 @@ def collect_sample(sm, *, wall_ms: int, mono_ns: int) -> dict:
                        'vision': value.smartCruiseControl.vision.to_dict(), 'accelController': value.accelController.to_dict()}
     elif name == 'deviceState':
       signals[name] = {'started': value.started}
-  return {'kind': 'sample', 'wall_time_ms': wall_ms, 'mono_time_ns': mono_ns, 'health': health, 'signals': signals}
+  return {'kind': 'sample', 'wall_time_ms': wall_ms, 'mono_time_ns': mono_ns, 'health': health, 'signals': signals,
+          'lane_position_evidence': {
+            'absolute': read_lane_evidence(Path('/dev/shm/road_lane_position.json'), mono_ns=mono_ns),
+            'anchors': read_lane_evidence(Path('/dev/shm/lane_anchor_state.json'), mono_ns=mono_ns),
+          }}
 
 
 def main() -> None:

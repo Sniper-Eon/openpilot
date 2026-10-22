@@ -107,6 +107,9 @@ def write_lane_position(*, valid: bool, position: dict, current, now_ns: int, st
     "source": "commaCamera",
     "absolute_confirmed": bool(valid),
     "stable_samples": int(stable_samples),
+    # Diagnostic evidence only. Existing readers still require valid=true,
+    # absolute_confirmed=true and a fresh confirmed index for control.
+    "estimate": dict(position),
     "nav_session_id": str(current.snapshot.session_id) if current is not None else "",
     "route_revision": int(current.snapshot.route_revision) if current is not None else 0,
     "capture_mono_ns": int(now_ns),

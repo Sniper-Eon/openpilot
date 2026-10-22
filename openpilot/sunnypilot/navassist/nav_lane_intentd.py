@@ -156,6 +156,7 @@ def build_lane_plan(nav, topology, *, healthy: bool, settings: NavAssistSettings
     # is no common absolute index, so retain the observation but do not control.
     return NavLanePlan(
       False, str(nav.sessionId), int(nav.routeRevision), int(nav.maneuverEventId), amap_lane_count, (),
+      observation_interrupted=bool(nav_valid and recommended),
     )
 
   heuristic_valid = bool(
@@ -286,6 +287,8 @@ def main() -> None:
     intent = lane_intent if lane_intent.signal_requested else (
       turn_intent if settings.turn_signal_enabled else NavLaneIntent(reason="turnSignalsDisabled")
     )
+    if not lane_intent.signal_requested and not turn_intent.signal_requested and lane_intent.reason.startswith("lanePosition"):
+      intent = lane_intent
     if not settings.enabled:
       intent = NavLaneIntent(reason="navigationDisabled")
 
