@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import math
 import time
+from pathlib import Path
 
 from openpilot.cereal import messaging
 from openpilot.common.realtime import Ratekeeper
@@ -59,7 +61,32 @@ def neighbor_observation(topology, *, side: str, healthy: bool) -> bool | None:
   return True if getattr(topology, f"{side}NeighborExists") else None
 
 
-def build_lane_plan(nav, topology, *, healthy: bool, settings: NavAssistSettings | None = None) -> NavLanePlan:
+LANE_POSITION_PATH = Path("/dev/shm/road_lane_position.json")
+LANE_POSITION_MAX_AGE_NS = 2_000_000_000
+
+
+def c3_lane_position_ego_index(amap_lane_count: int, session_id: str, route_revision: int) -> int | None:
+  """Fresh, same-session absolute C3 lane position as AMap's 0-based ego index."""
+  try:
+    data = json.loads(LANE_POSITION_PATH.read_text())
+    captured = data.get("capture_mono_ns")
+    count = data.get("lane_count")
+    index = data.get("lane_index")
+    age_ns = time.monotonic_ns() - int(captured) if type(captured) is int else -1
+    if (data.get("valid") is True and data.get("absolute_confirmed") is True
+        and 0 <= age_ns <= LANE_POSITION_MAX_AGE_NS
+        and str(data.get("nav_session_id", "")) == str(session_id)
+        and int(data.get("route_revision", -1)) == int(route_revision)
+        and type(count) is int and type(index) is int
+        and count == amap_lane_count and 1 <= index <= count):
+      return index - 1
+  except (OSError, ValueError, TypeError):
+    pass
+  return None
+
+
+def build_lane_plan(nav, topology, *, healthy: bool, settings: NavAssistSettings | None = None,
+                    amap_ego_index: int | None = None) -> NavLanePlan:
   settings = settings if settings is not None else NavAssistSettings()
   nav_valid = bool(healthy and nav.valid and not nav.stale and settings.enabled and settings.lane_change_enabled)
   lanes = tuple(nav.lanes)
@@ -84,6 +111,34 @@ def build_lane_plan(nav, topology, *, healthy: bool, settings: NavAssistSettings
 
   if lanes:
     amap_lane_count = len(lanes)
+    # Translate AMap full-road recommendations into the local visible window.
+    # Passing AMap indices raw makes the coordinator compare them with a
+    # different egoLaneIndexFromLeft and steer to the wrong edge.
+    if nav_valid and amap_ego_index is not None and 0 <= amap_ego_index < amap_lane_count:
+      visual_ego = int(topology.egoLaneIndexFromLeft)
+      if 0 <= visual_ego < lane_count:
+        offset = amap_ego_index - visual_ego
+        visual_recommended = tuple(index - offset for index in recommended if 0 <= index - offset < lane_count)
+        if visual_recommended:
+          return NavLanePlan(
+            True, str(nav.sessionId), int(nav.routeRevision), int(nav.maneuverEventId),
+            lane_count, visual_recommended,
+          )
+    # A confirmed absolute lane also permits one adjacent step toward a
+    # recommendation outside the local window. Do not equate the local index
+    # with an absolute lane or require the final destination to be visible.
+    if nav_valid and amap_ego_index is not None and 0 <= amap_ego_index < amap_lane_count:
+      visual_ego = int(topology.egoLaneIndexFromLeft)
+      absolute_recommended = tuple(index for index in recommended if 0 <= index < amap_lane_count)
+      if 0 <= visual_ego < lane_count and absolute_recommended:
+        nearest = min(absolute_recommended, key=lambda index: (abs(index - amap_ego_index), index))
+        step = -1 if nearest < amap_ego_index else (1 if nearest > amap_ego_index else 0)
+        adjacent = visual_ego + step
+        if step and 0 <= adjacent < lane_count:
+          return NavLanePlan(
+            True, str(nav.sessionId), int(nav.routeRevision), int(nav.maneuverEventId),
+            lane_count, (adjacent,),
+          )
     edge_recommended = bool(
       (fallback_side == "left" and 0 in recommended)
       or (fallback_side == "right" and amap_lane_count - 1 in recommended)
@@ -148,7 +203,8 @@ def main() -> None:
     model_meta = sm["modelV2"].meta
     # A brief lane-observation gap is not a navigation outage or a loss of
     # actual lateral control. The coordinator bounds it with its existing grace.
-    plan = build_lane_plan(nav, topology, healthy=base_healthy, settings=settings)
+    amap_ego_index = c3_lane_position_ego_index(len(nav.lanes), str(nav.sessionId), int(nav.routeRevision)) if len(nav.lanes) > 0 else None
+    plan = build_lane_plan(nav, topology, healthy=base_healthy, settings=settings, amap_ego_index=amap_ego_index)
     topology_input = LaneTopologyInput(
       valid_for_control=bool(healthy and topology.validForControl),
       visible_lane_count=int(topology.visibleLaneCount),
@@ -188,17 +244,45 @@ def main() -> None:
       maneuver=str(nav.maneuver),
       distance_m=float(nav.maneuverDistanceM),
     )
-    turn_intent = turn_signal_coordinator.update(
-      turn_plan, speed_mps=float(car_state.vEgo), now_ns=now_ns,
-      turn_geometry_active=sp_turn_geometry_active(sm["controlsState"], float(car_state.vEgo)),
-      lookahead_time_s=settings.signal_lead_time_s,
+    turn_maneuver = str(nav.maneuver)
+    turn_is_intersection = turn_maneuver in LEFT_TURN_LANE_MANEUVERS | RIGHT_TURN_LANE_MANEUVERS
+    current_in_recommended = bool(
+      amap_ego_index is not None and any(
+        int(lane.index) == amap_ego_index and bool(lane.recommended) for lane in nav.lanes
+      )
     )
+    if turn_is_intersection:
+      turn_intent = turn_signal_coordinator.update(
+        turn_plan, speed_mps=float(car_state.vEgo), now_ns=now_ns,
+        turn_geometry_active=sp_turn_geometry_active(sm["controlsState"], float(car_state.vEgo)),
+        lookahead_time_s=settings.signal_lead_time_s,
+      )
+    else:
+      # Provisional: non-intersection lamps are resolved after lane intent.
+      turn_intent = NavLaneIntent(reason="turnSignalResolving")
     # Reuse the existing pre-turn window. An SP change already in progress
     # finishes before handoff; a further approach-lane change must not suppress
     # the model's turn desire at the intersection.
     lane_intent = coordinator.update(
       plan, topology_input, vehicle, now_ns=now_ns, allow_new_lane_change=lane_alignment_may_start(nav, turn_intent),
     )
+    if not turn_is_intersection:
+      # Keep early merge/exit guidance only while the ego is outside the
+      # recommended set. Once inside it, suppress the lamp so Tesla cannot
+      # continue into the road edge. Lane intent has priority when it has a
+      # concrete adjacent target.
+      if current_in_recommended:
+        turn_intent = NavLaneIntent(reason="turnSignalInRecommendedLane")
+      elif amap_ego_index is None:
+        turn_intent = NavLaneIntent(reason="turnSignalLaneUnknown")
+      elif lane_intent.signal_requested or lane_intent.reason in ("waitingBlindspot", "waitingCrossing"):
+        turn_intent = NavLaneIntent(reason="turnSignalLaneIntentOwns")
+      else:
+        turn_intent = turn_signal_coordinator.update(
+          turn_plan, speed_mps=float(car_state.vEgo), now_ns=now_ns,
+          turn_geometry_active=sp_turn_geometry_active(sm["controlsState"], float(car_state.vEgo)),
+          lookahead_time_s=settings.signal_lead_time_s,
+        )
     intent = lane_intent if lane_intent.signal_requested else (
       turn_intent if settings.turn_signal_enabled else NavLaneIntent(reason="turnSignalsDisabled")
     )

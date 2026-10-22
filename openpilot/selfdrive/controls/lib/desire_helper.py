@@ -1,6 +1,10 @@
+import json
+import time
+
 from openpilot.cereal import log, custom
 from openpilot.common.constants import CV
 from openpilot.common.realtime import DT_MDL
+from openpilot.sunnypilot.selfdrive.controls.lib.phone_blindspot_assist import PhoneBlindspotAssist
 from openpilot.sunnypilot.selfdrive.controls.lib.auto_lane_change import AutoLaneChangeController, AutoLaneChangeMode
 from openpilot.sunnypilot.selfdrive.controls.lib.lane_turn_desire import LaneTurnController
 
@@ -11,6 +15,12 @@ TurnDirection = custom.ModelDataV2SP.TurnDirection
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 LANE_CHANGE_START_TIME = 0.5
+
+SIDE_VISION_PATH = "/dev/shm/side_vehicles.json"
+SIDE_VISION_MAX_AGE_MS = 1000.0
+SIDE_VISION_MAX_DISTANCE_M = 30.0
+SIDE_VISION_MAX_REL_SPEED_MPS = 12.0
+SIDE_VISION_MIN_HITS = 3
 
 TURN_DESIRES = {
   TurnDirection.none: log.Desire.none,
@@ -33,10 +43,49 @@ class DesireHelper:
     self._active_nav_signal_feedback = False
     self._nav_signal_tail_direction: str | None = None
     self._nav_signal_tail_turn_only = False
+    self.phone_blindspot_assist = PhoneBlindspotAssist()
+    self.phone_blindspot_states = self.phone_blindspot_assist.states
+    self._side_vision_read_t = 0.0
+    self._side_vision_state = (False, False)
 
   @staticmethod
   def get_lane_change_direction(left_blinker, right_blinker):
     return LaneChangeDirection.left if left_blinker and not right_blinker else LaneChangeDirection.right
+
+  def _side_vision_blocked(self):
+    """Front-side camera block; fail-safe to both sides when the feed is stale."""
+    now = time.monotonic()
+    if now - self._side_vision_read_t < 0.1:
+      return self._side_vision_state
+    self._side_vision_read_t = now
+    left = right = False
+    try:
+      with open(SIDE_VISION_PATH) as f:
+        data = json.load(f)
+      age_ms = (time.monotonic_ns() - int(data.get("updated_mono_ns", 0))) / 1e6
+      if age_ms > SIDE_VISION_MAX_AGE_MS or not data.get("valid", False):
+        left = right = True
+      else:
+        for side, key in ((True, "left"), (False, "right")):
+          item = data.get(key)
+          if not isinstance(item, dict):
+            continue
+          dist = item.get("distance_m")
+          rel = item.get("relative_speed_mps")
+          hits = item.get("hits", 0)
+          if dist is None or hits < SIDE_VISION_MIN_HITS:
+            continue
+          if dist <= SIDE_VISION_MAX_DISTANCE_M and (rel is None or abs(rel) <= SIDE_VISION_MAX_REL_SPEED_MPS):
+            if side:
+              left = True
+            else:
+              right = True
+    except FileNotFoundError:
+      left = right = False
+    except Exception:
+      left = right = True
+    self._side_vision_state = (left, right)
+    return self._side_vision_state
 
   def update(self, carstate, lateral_active, lane_change_prob, left_edge_detected=False, right_edge_detected=False,
              nav_lane_intent=None, left_line_blocked=False, right_line_blocked=False,
@@ -44,6 +93,8 @@ class DesireHelper:
     self.alc.update_params()
     self.lane_turn_controller.update_params()
     v_ego = carstate.vEgo
+    vision_left, vision_right = self._side_vision_blocked()
+    self.phone_blindspot_states = self.phone_blindspot_assist.read(time.monotonic_ns())
     # targetLaneIndex < 0 is a physical pre-turn lamp request only. Keep it out
     # of the lane-change state machine so an upcoming turn cannot become a
     # lateral lane-change desire.
@@ -119,7 +170,7 @@ class DesireHelper:
     lane_turn_right_blinker = bool(carstate.rightBlinker and not (nav_lane_signal_right or nav_lane_tail_right))
 
     # Lane turn controller update
-    self.lane_turn_controller.update_lane_turn(blindspot_left=carstate.leftBlindspot, blindspot_right=carstate.rightBlindspot,
+    self.lane_turn_controller.update_lane_turn(blindspot_left=(carstate.leftBlindspot or vision_left), blindspot_right=(carstate.rightBlindspot or vision_right),
                                                left_blinker=lane_turn_left_blinker,
                                                right_blinker=lane_turn_right_blinker, v_ego=v_ego)
     self.lane_turn_direction = self.lane_turn_controller.get_turn_direction()
@@ -144,8 +195,8 @@ class DesireHelper:
                          ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
                           (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right))
 
-        left_blocked = carstate.leftBlindspot or left_edge_detected or left_line_blocked
-        right_blocked = carstate.rightBlindspot or right_edge_detected or right_line_blocked
+        left_blocked = carstate.leftBlindspot or left_edge_detected or left_line_blocked or vision_left
+        right_blocked = carstate.rightBlindspot or right_edge_detected or right_line_blocked or vision_right
         blindspot_detected = ((left_blocked and self.lane_change_direction == LaneChangeDirection.left) or
                               (right_blocked and self.lane_change_direction == LaneChangeDirection.right))
 
@@ -159,16 +210,21 @@ class DesireHelper:
         nav_not_ready = nav_signal and not (
           physical_nav_signal_on and nav_crossing_allowed and bool(getattr(nav_lane_intent, "spLaneChangeReady", False))
         )
-        lane_change_blocked = blindspot_detected or nav_not_ready
-
-        self.alc.update_lane_change(lane_change_blocked, carstate.brakePressed)
+        phone_side = self.phone_blindspot_states[0 if self.lane_change_direction == LaneChangeDirection.left else 1]
+        phone_veto = self.phone_blindspot_assist.enabled and phone_side.blocked
+        phone_ready = not self.phone_blindspot_assist.enabled or phone_side.available
+        lane_change_blocked = blindspot_detected or nav_not_ready or phone_veto
+        if not phone_ready:
+          self.alc.lane_change_wait_timer = 0.0
+          self.alc.auto_lane_change_allowed = False
+        self.alc.update_lane_change(lane_change_blocked or not phone_ready, carstate.brakePressed)
 
         if not one_blinker or below_lane_change_speed:
           self.lane_change_state = LaneChangeState.off
           self.lane_change_direction = LaneChangeDirection.none
           self.lane_change_timer = 0.0
         else:
-          if (torque_applied or self.alc.auto_lane_change_allowed) and not lane_change_blocked:
+          if (torque_applied or (self.alc.auto_lane_change_allowed and phone_ready)) and not lane_change_blocked:
             self.lane_change_state = LaneChangeState.laneChangeStarting
             self.lane_change_timer = 0.0
 
@@ -181,9 +237,9 @@ class DesireHelper:
         # crossing it. Cancelling means: state off, no direction, timer reset.
         side_blocked = False
         if self.lane_change_direction == LaneChangeDirection.left:
-          side_blocked = carstate.leftBlindspot or left_edge_detected or left_line_blocked
+          side_blocked = carstate.leftBlindspot or left_edge_detected or left_line_blocked or vision_left
         elif self.lane_change_direction == LaneChangeDirection.right:
-          side_blocked = carstate.rightBlindspot or right_edge_detected or right_line_blocked
+          side_blocked = carstate.rightBlindspot or right_edge_detected or right_line_blocked or vision_right
 
         if side_blocked:
           self.lane_change_state = LaneChangeState.off

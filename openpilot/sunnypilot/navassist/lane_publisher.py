@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 from openpilot.cereal import messaging
 from openpilot.sunnypilot.lane_topology.types import LaneMarkingType, LaneTopologyState
+from openpilot.sunnypilot.navassist.lane_position import same_direction_lane_anchors
 
 
 MODEL_MAX_AGE_NS = 150_000_000
@@ -27,6 +32,29 @@ TOPOLOGY_TO_CEREAL = {
   LaneTopologyState.stale: "stale",
 }
 CROSSABLE_EGO_MARKINGS = {LaneMarkingType.dashed, LaneMarkingType.doubleDashed}
+ANCHOR_PATH = Path("/dev/shm/lane_anchor_state.json")
+
+
+def publish_lane_anchors(now_ns: int, topology, lanes_left: int, lanes_right: int,
+                         left_source: str, right_source: str) -> None:
+  """Live IPC for navassistd: the manager's forked children may still hold the
+  pre-upgrade cereal schema, so anchors ride a small file instead of new capnp
+  fields until the next manager restart."""
+  payload = {
+    "publish_mono_ns": int(now_ns),
+    "visible_lane_count": int(topology.visible_lane_count),
+    "ego_lane_index_from_left": int(topology.ego_lane_index_from_left),
+    "lanes_left_same_direction": int(lanes_left),
+    "lanes_right_same_direction": int(lanes_right),
+    "left_anchor_source": left_source,
+    "right_anchor_source": right_source,
+  }
+  tmp = ANCHOR_PATH.with_suffix(".tmp")
+  try:
+    tmp.write_text(json.dumps(payload, separators=(",", ":")))
+    os.replace(tmp, ANCHOR_PATH)
+  except OSError:
+    pass
 
 
 def raw_marking_matches(bridge, source_id: int, expected: LaneMarkingType) -> bool:
@@ -76,6 +104,8 @@ def build_lane_topology_message(bridge, *, now_ns: int, image_mono_time: int = 0
   state.leftNeighborExists = topology.lanes_left_of_ego > 0
   state.rightNeighborExists = topology.lanes_right_of_ego > 0
   state.sourcePairChanged = source_pair_changed
+  lanes_left, lanes_right, left_anchor, right_anchor = same_direction_lane_anchors(topology)
+  publish_lane_anchors(now_ns, topology, lanes_left, lanes_right, left_anchor, right_anchor)
 
   marking_types = bridge.ego_marking_types()
   left_type, right_type = marking_types or (LaneMarkingType.unknown, LaneMarkingType.unknown)

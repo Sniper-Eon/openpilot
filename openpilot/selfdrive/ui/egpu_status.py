@@ -92,7 +92,7 @@ def egpu_icon_visible(*, connected: bool) -> bool:
   return connected
 
 
-def resolve_egpu_connection(device_state) -> bool:
+def _disabled_resolve_egpu_connection(device_state) -> bool:
   """Return the current physical Chestnut USB presence without trip latching."""
   return bool(device_state.chestnutPresent)
 
@@ -234,3 +234,15 @@ def draw_egpu_status_panel(rect: rl.Rectangle, font: rl.Font, *, compact: bool) 
       rl.Color(255, 180, 60, 245) if index == 0 else rl.Color(255, 255, 255, 225)
     )
     rl.draw_text_ex(font, line, rl.Vector2(panel.x + 12, panel.y + index * style.line_height), style.font_size, 0, color)
+
+
+def resolve_egpu_connection(*args, **kwargs):
+  return False
+
+
+def egpu_icon_visible(*args, **kwargs):
+  return False
+
+
+def draw_egpu_status_panel(*args, **kwargs):
+  return None

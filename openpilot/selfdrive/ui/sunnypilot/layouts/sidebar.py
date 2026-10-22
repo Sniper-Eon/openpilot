@@ -67,6 +67,7 @@ class SidebarSP:
     self._egpu_detail = "未检测到 eGPU USB 设备"
 
   def _update_egpu_status(self):
+    return
     present = resolve_egpu_connection(ui_state.sm["deviceState"])
     eject_status = ui_state.params.get("UsbGpuEjectStatus")
     speed_mbps = chestnut_usb_speed_mbps(ui_state.sm["deviceState"])
@@ -110,6 +111,7 @@ class SidebarSP:
     self._egpu_status.update("eGPU", status.value, color, icon)
 
   def _handle_egpu_click(self, mouse_pos) -> bool:
+    return False
     if not rl.check_collision_point_rec(mouse_pos, self._egpu_metric_rect):
       return False
 
