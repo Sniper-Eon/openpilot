@@ -22,11 +22,11 @@ git clone --recurse-submodules --branch codex/egpu-jetlink-navassist https://git
 
 ## 下载匹配 APP
 
-[下载 TesNav-R10-phone-vision.apk](https://github.com/Sniper-Eon/openpilot/releases/download/navassist-phone-r10-20261023/TesNav-R10-phone-vision.apk)
+[下载 APK 压缩包（先解压后安装）](https://github.com/Sniper-Eon/openpilot/releases/download/navassist-phone-r10-20261023/TesNav-R10-phone-vision.apk.zip)
 
 显示名：**特会开·视觉帧率测试R10**；包名 `com.garan.tesnav.tenengkai.lane`；版本 `14 / 1.2-vision-fps-r10`。APK 是已经安装验证的原始签名文件，没有重新打包。与已安装同签名版本可覆盖安装；其他签名无法覆盖，先保留原应用数据并核对版本。
 
-APK 较大，放在 GitHub Release 附件，不塞进 Git 历史。源码在分支中可直接查看，也可从 Release 下载整套 ZIP。当前 Release 标为测试版，手机视觉保持 shadow 观察模式。
+APK 较大，以无损 ZIP 放在 GitHub Release 附件，不塞进 Git 历史。先解压 `TesNav-R10-phone-vision.apk.zip`，再安装其中的 `TesNav-R10-phone-vision.apk`；解压所得 APK 与当前设备版本逐字节相同。源码在分支中可直接查看，也可从 Release 下载整套 ZIP。当前 Release 标为测试版，手机视觉保持 shadow 观察模式。
 
 ## 朋友首次安装
 
