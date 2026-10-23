@@ -1,3 +1,7 @@
+## 特会开手机视觉完整配套工程
+
+[C3 + APP 全量工程与安装说明](companion/README.md) · [R10 APK / 源码下载](https://github.com/Sniper-Eon/openpilot/releases/tag/navassist-phone-r10-20261023)
+
 ![](https://user-images.githubusercontent.com/47793918/233812617-beab2e71-57b9-479e-8bff-c3931347ca40.png)
 
 ## 🌞 What is sunnypilot?

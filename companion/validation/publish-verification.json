@@ -1,0 +1,28 @@
+{
+  "android_tests": {
+    "tests": 330,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1
+  },
+  "c3_bridge_and_installer_tests": {
+    "tests": 26,
+    "passed": 26
+  },
+  "matched_archive_files_byte_identical": 209,
+  "app_changed_from_matched_archive": [
+    "build.sh",
+    "install.sh"
+  ],
+  "apk_sha256": "e69f6a54956340519340785eac9a1d244d1adeed9e571cb661c7e609a505d7b8",
+  "apk_signature_verified": true,
+  "apk_certificate_sha256": "f5ec7f024863d08af62f97d8e64e096b7a7523fc6a1fe484dba8829ae8f1905d",
+  "model_matches_apk_and_source": true,
+  "c3_bridge_matches_deployed_r10_source": true,
+  "private_material_pattern_findings": [],
+  "c3_driving_source_changed": false,
+  "device_deployment_performed": false,
+  "current_mode": "shadow",
+  "road_test_performed_this_release": false,
+  "code_and_asset_files_before_report": 235
+}

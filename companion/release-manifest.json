@@ -1,0 +1,21 @@
+{
+  "base_c3_commit": "34e2ff75d91e81b67bfc9274382b01713be6ce13",
+  "branch": "codex/egpu-jetlink-navassist",
+  "app": {
+    "display_name": "特会开·视觉帧率测试R10",
+    "package": "com.garan.tesnav.tenengkai.lane",
+    "version_code": 14,
+    "version_name": "1.2-vision-fps-r10",
+    "apk_file": "TesNav-R10-phone-vision.apk",
+    "apk_sha256": "e69f6a54956340519340785eac9a1d244d1adeed9e571cb661c7e609a505d7b8"
+  },
+  "mode": "shadow",
+  "phone_model_sha256": "58ebd0451c4074ee8f54475eaf7be818517521f90eb47c1a15b481ea892a9231",
+  "c3_bridge_sha256": "a7c7de23d33629d9af802f1dc6e8cdea0d3aa2e6f5a4609294d4c1d6e1b39309",
+  "changes_from_matched_app_archive": [
+    "portable build.sh",
+    "portable install.sh"
+  ],
+  "includes_private_signing_key": false,
+  "includes_device_connection_code": false
+}

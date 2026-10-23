@@ -1,0 +1,50 @@
+name: TesNavIOS
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "15.0"
+configs:
+  Debug: debug
+  Release: release
+fileGroups:
+  - Base.xcconfig
+configFiles:
+  Debug: Base.xcconfig
+  Release: Base.xcconfig
+targets:
+  TesNavIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: TesNavIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.garan.tesnav.ios
+        PRODUCT_NAME: TesNavIOS
+        INFOPLIST_FILE: TesNavIOS/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: TesNavIOS/TesNavIOS-Bridging-Header.h
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: $(TESNAV_DEVELOPMENT_TEAM)
+        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: 0.4.0
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1"
+    scheme:
+      testTargets:
+        - TesNavIOSTests
+  TesNavIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: TesNavIOSTests
+    dependencies:
+      - target: TesNavIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.garan.tesnav.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: NO

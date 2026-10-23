@@ -1,0 +1,6 @@
+// Local secrets and signing identifiers belong in Config.local.xcconfig.
+// The AMAP key must be an iOS key bound to com.garan.tesnav.ios.
+AMAP_IOS_API_KEY =
+TESNAV_DEVELOPMENT_TEAM =
+
+#include? "Config.local.xcconfig"

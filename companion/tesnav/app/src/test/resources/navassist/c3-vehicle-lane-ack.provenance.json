@@ -1,0 +1,8 @@
+{
+  "producer": "D:\\C3\\openpilot-navassist-track-p0\\openpilot\\sunnypilot\\navassist\\oem_lane_feedback.py",
+  "producer_sha256": "c48b94acbb13cd279a0a63d9b86af209845a292edfff3d1ca0d442fe44b249c9",
+  "input": "OemLaneFeedback().snapshot(now_ns=1), default invalid state",
+  "bytes": 592,
+  "fixture_sha256": "dcd2211a9277979ba75514d2b40287a7bd5fdec078f73f210b3a9e5ffeaf0651",
+  "scope": "Local producer fixture only; not a deployed-version compatibility claim"
+}

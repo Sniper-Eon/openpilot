@@ -1,0 +1,15 @@
+# Device and developer secrets, caches, and generated observations
+**/connection-code
+**/local.properties
+**/*.jks
+**/*.keystore
+**/.env
+**/.env.*
+**/__pycache__/
+**/.pytest_cache/
+**/.gradle/
+**/.kotlin/
+**/build/
+**/backups/
+**/*.apk
+**/phone_side_vehicles.json

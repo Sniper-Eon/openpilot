@@ -1,0 +1,16 @@
+[Unit]
+Description=C3 camera bridge for phone vision
+After=network.target
+RequiresMountsFor=/data/phone-vision /data/openpilot
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=comma
+ExecStart=/data/phone-vision/start_bridge.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target
