@@ -218,3 +218,25 @@ def test_completed_lane_change_tail_transfers_to_same_direction_turn(direction):
   assert desire.desire == log.Desire.none
   desire.update(car_state(vEgo=5.0, **lamp_on), True, 0.0)
   assert desire.desire == expected_turn
+
+
+def test_navigation_coordinator_holds_lamp_and_preparation_without_crossing_solid_or_blindspot():
+  from openpilot.sunnypilot.navassist.lane_intent import (
+    NavLaneIntentCoordinator, NavLanePlan, LaneTopologyInput, LaneVehicleInput,
+  )
+  for solid, blindspot in ((True, False), (False, True)):
+    coordinator = NavLaneIntentCoordinator()
+    plan = NavLanePlan(True, "test-route", 1, 1, 3, (0,))
+    topo = LaneTopologyInput(True, 3, 1, True, True, not solid, True)
+    vehicle = LaneVehicleInput(True, 15., left_blindspot=blindspot)
+    coordinator.update(plan, topo, vehicle, now_ns=0)
+    request = coordinator.update(plan, topo, vehicle, now_ns=500_000_000)
+    assert request.signal_requested and not request.lane_change_ready
+    nav = intent(ready=request.lane_change_ready)
+    desire = helper()
+    desire._side_vision_blocked = lambda: (False, False)
+    for _ in range(600):
+      desire.update(car_state(leftBlinker=True, leftBlindspot=blindspot), True, 1.,
+                    nav_lane_intent=nav, left_line_blocked=solid, left_crossing_allowed=not solid)
+      assert desire.lane_change_state == LaneChangeState.preLaneChange
+      assert desire.desire == log.Desire.none

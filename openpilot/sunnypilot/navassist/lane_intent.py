@@ -600,10 +600,11 @@ class NavLaneIntentCoordinator:
           return self._idle(self._plan_reason(plan, "stabilizingLaneAlignment"))
       if not plan.force_fork and now_ns - self._candidate_since_ns < self.MISMATCH_STABLE_NS:
         return self._idle(self._plan_reason(plan, "stabilizingLaneAlignment"))
-      crossing_allowed = topology.left_crossing_allowed if direction == LaneIntentDirection.left else topology.right_crossing_allowed
-      blindspot = vehicle.left_blindspot if direction == LaneIntentDirection.left else vehicle.right_blindspot
-      if not crossing_allowed or blindspot:
-        return self._idle(self._plan_reason(plan, "waitingCrossing" if not crossing_allowed else "waitingBlindspot"))
+      # A stable navigation target requests the lamp/preparation independently
+      # of permission to cross. Solid paint and blindspots still gate readiness
+      # below, and DesireHelper independently vetoes actual lateral initiation.
+      # Neighbor existence, topology/vehicle health and the bounded signal wait
+      # remain prerequisites; a lamp never means that the target lane is clear.
       self._phase = "signaling"
       self._phase_since_ns = now_ns
       self._signal_since_ns = now_ns
@@ -655,11 +656,17 @@ class NavLaneIntentCoordinator:
       self._crossing_since_ns = 0
 
     ready = self._phase in ("ready", "changing")
+    reason = self._phase
+    if self._phase == "signaling":
+      if not crossing_allowed:
+        reason = "waitingCrossing"
+      elif blindspot:
+        reason = "waitingBlindspot"
     return NavLaneIntent(
       signal_requested=True,
       lane_change_ready=ready,
       direction=direction,
       request_id=self._request_id,
       target_lane_index=self._adjacent_target_index(topology.ego_lane_index, direction),
-      reason=self._plan_reason(plan, self._phase),
+      reason=self._plan_reason(plan, reason),
     )

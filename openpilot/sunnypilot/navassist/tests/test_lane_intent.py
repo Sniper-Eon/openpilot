@@ -199,7 +199,7 @@ def test_signal_waits_at_solid_line_then_authorizes_after_dashed_is_stable():
   assert not first_mismatch.signal_requested and not first_mismatch.lane_change_ready
   assert first_mismatch.reason == "stabilizingLaneAlignment"
   waiting = coordinator.update(plan(), topology(), vehicle(), now_ns=500_000_000)
-  assert not waiting.signal_requested and waiting.reason == "waitingCrossing"
+  assert waiting.signal_requested and not waiting.lane_change_ready and waiting.reason == "waitingCrossing"
   first_dashed = coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=600_000_000)
   assert first_dashed.signal_requested and not first_dashed.lane_change_ready
   authorized = coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=900_000_000)
@@ -207,14 +207,14 @@ def test_signal_waits_at_solid_line_then_authorizes_after_dashed_is_stable():
   assert authorized.direction == LaneIntentDirection.left
 
 
-def test_blindspot_delays_physical_signal_until_the_lane_change_can_start():
+def test_blindspot_keeps_signal_requested_while_lane_change_waits():
   coordinator = NavLaneIntentCoordinator()
   coordinator.update(plan(recommended=(2,)), topology(right_cross=True), vehicle(), now_ns=0)
   coordinator.update(plan(recommended=(2,)), topology(right_cross=True),
                      vehicle(bsm_right=True, right_blinker=True), now_ns=500_000_000)
   blocked = coordinator.update(plan(recommended=(2,)), topology(right_cross=True),
                                vehicle(bsm_right=True, right_blinker=True), now_ns=900_000_000)
-  assert not blocked.signal_requested and blocked.reason == "waitingBlindspot"
+  assert blocked.signal_requested and not blocked.lane_change_ready and blocked.reason == "waitingBlindspot"
 
   signaling = coordinator.update(
     plan(recommended=(2,)), topology(right_cross=True), vehicle(right_blinker=True), now_ns=1_000_000_000,
@@ -361,3 +361,50 @@ def test_long_solid_wait_gets_a_fresh_lane_change_timeout_when_dashed_appears():
   assert authorized.lane_change_ready
   still_authorized = coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=11_350_000_000)
   assert still_authorized.lane_change_ready
+
+
+def test_blocked_navigation_holds_same_request_but_expires_in_bounded_time():
+  for topo, state, reason in (
+    (topology(), vehicle(), "waitingCrossing"),
+    (topology(left_cross=True), vehicle(bsm_left=True), "waitingBlindspot"),
+  ):
+    coordinator = NavLaneIntentCoordinator()
+    coordinator.update(plan(), topo, state, now_ns=0)
+    first = coordinator.update(plan(), topo, state, now_ns=500_000_000)
+    held = coordinator.update(plan(), topo, state, now_ns=5_000_000_000)
+    assert first.signal_requested and held.signal_requested
+    assert not first.lane_change_ready and not held.lane_change_ready
+    assert first.request_id == held.request_id and held.reason == reason
+    expired = coordinator.update(plan(), topo, state, now_ns=61_000_000_000)
+    assert not expired.signal_requested and expired.reason == "crossingWaitTimeout"
+    assert not coordinator.update(plan(), topo, state, now_ns=62_000_000_000).signal_requested
+
+
+def test_new_obstacle_withdraws_only_readiness_then_requires_fresh_stability():
+  for unsafe_topology, unsafe_vehicle, reason in (
+    (topology(), vehicle(left_blinker=True), "waitingCrossing"),
+    (topology(left_cross=True), vehicle(bsm_left=True, left_blinker=True), "waitingBlindspot"),
+  ):
+    coordinator = NavLaneIntentCoordinator()
+    coordinator.update(plan(), topology(left_cross=True), vehicle(), now_ns=0)
+    coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=500_000_000)
+    ready = coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=800_000_000)
+    assert ready.lane_change_ready
+    held = coordinator.update(plan(), unsafe_topology, unsafe_vehicle, now_ns=900_000_000)
+    assert held.signal_requested and not held.lane_change_ready and held.reason == reason
+    assert held.request_id == ready.request_id
+    fresh = coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=1_000_000_000)
+    assert fresh.signal_requested and not fresh.lane_change_ready
+    assert coordinator.update(plan(), topology(left_cross=True), vehicle(left_blinker=True), now_ns=1_300_000_000).lane_change_ready
+
+
+def test_holding_signal_does_not_bypass_no_neighbor_or_driver_braking():
+  from dataclasses import replace
+  coordinator = NavLaneIntentCoordinator()
+  no_lane = coordinator.update(plan(), topology(left=False), vehicle(bsm_left=True), now_ns=0)
+  assert not no_lane.signal_requested
+  coordinator = NavLaneIntentCoordinator()
+  coordinator.update(plan(), topology(), vehicle(), now_ns=0)
+  assert coordinator.update(plan(), topology(), vehicle(), now_ns=500_000_000).signal_requested
+  stopped = coordinator.update(plan(), topology(), replace(vehicle(), brake_pressed=True), now_ns=600_000_000)
+  assert not stopped.signal_requested

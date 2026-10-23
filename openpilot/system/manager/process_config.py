@@ -237,6 +237,9 @@ procs = [
   PythonProcess("external_laned", "openpilot.sunnypilot.lane_topology.external.sender", external_lane_observer_ready,
                 restart_if_crash=True),
   PythonProcess("nav_lane_intentd", "openpilot.sunnypilot.navassist.nav_lane_intentd", navassist_lane_observer_ready),
+  # Standalone observer only: writes diagnostic risk estimates, never lane-change permission.
+  PythonProcess("phone_closing_riskd", "openpilot.sunnypilot.navassist.closing_riskd",
+                navassist_lane_observer_ready, restart_if_crash=True),
   PythonProcess("maneuversd", "openpilot.tools.longitudinal_maneuvers.maneuversd", long_maneuver),
   PythonProcess("lateral_maneuversd", "openpilot.tools.lateral_maneuvers.lateral_maneuversd", lat_maneuver),
   PythonProcess("radard", "openpilot.selfdrive.controls.radard", only_onroad),
