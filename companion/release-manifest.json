@@ -21,5 +21,13 @@
   "automatic_overtaking_enabled": false,
   "tesla_body_camera_live_integration_cancelled": true,
   "includes_private_signing_key": false,
-  "includes_device_connection_code": false
+  "includes_device_connection_code": false,
+  "source_candidate": {
+    "version_code": 16,
+    "version_name": "1.4-dual-pipeline-r12",
+    "apk_sha256": "c19ea9a981ff7745b26528c5fe4a6cc8e4f1fef9cd9f49517ea4a9112fac29c5",
+    "installed_on_original_phone": true,
+    "public_release_available": false,
+    "live_dual_performance_validated": false
+  }
 }

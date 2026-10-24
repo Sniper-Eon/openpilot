@@ -38,8 +38,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 15
-        versionName = "1.3-dual-observer-r11"
+        versionCode = 16
+        versionName = "1.4-dual-pipeline-r12"
 
         manifestPlaceholders["AMAP_API_KEY"] =
             providers.gradleProperty("AMAP_API_KEY").orNull ?: ""
@@ -85,7 +85,7 @@ android {
             matchingFallbacks += listOf("debug")
             signingConfig = signingConfigs.getByName("laneTest")
             buildConfigField("boolean", "EXTENDED_NAV_SOURCES", "true")
-            manifestPlaceholders["APP_NAME"] = "特会开·双相机测试R11"
+            manifestPlaceholders["APP_NAME"] = "特会开·双相机测试R12"
             manifestPlaceholders["AMAP_API_KEY"] =
                 providers.gradleProperty("LANETEST_AMAP_API_KEY").orNull
                     ?: providers.gradleProperty("TENENGKAI_AMAP_API_KEY").orNull
