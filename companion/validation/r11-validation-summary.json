@@ -1,0 +1,18 @@
+{
+  "python_tests_passed": 53,
+  "android_debug_tests": {
+    "tests": 339,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1
+  },
+  "tenengkai_apk_build_passed": true,
+  "signature_matches_r10": true,
+  "phone_installed_apk_verified": true,
+  "dual_mode_enabled": false,
+  "real_phone_dual_pipeline_tested": false,
+  "distance_accuracy_validated": false,
+  "speed_accuracy_validated": false,
+  "model_sha256": "58ebd0451c4074ee8f54475eaf7be818517521f90eb47c1a15b481ea892a9231",
+  "apk_sha256": "2a6485e328c66755649321c033657033b1d9d6926d3aa24e880b6ee584bae615"
+}

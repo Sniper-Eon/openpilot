@@ -7,6 +7,8 @@ def test_clean_install_has_independent_code_and_preserves_existing_configuration
  a,b=tmp_path/'a',tmp_path/'b';module.install(SOURCE,a);module.install(SOURCE,b)
  token=(a/'connection-code').read_text();assert len(token.strip())>=32;assert token!=(b/'connection-code').read_text();assert stat.S_IMODE((a/'connection-code').stat().st_mode)==0o600
  assert json.loads((a/'blindspot-assist.json').read_text())['mode']=='shadow'
+ assert (a/'dual_camera_store.py').is_file()
+ assert not (a/'dual-camera.enabled').exists() and not (a/'stereo-calibration.json').exists()
  existing='{"version":1,"mode":"shadow","custom":true}\n';(a/'blindspot-assist.json').write_text(existing)
  module.install(SOURCE,a);assert (a/'connection-code').read_text()==token;assert (a/'blindspot-assist.json').read_text()==existing
  assert list((a/'backups').glob('*/manifest.json'));assert not (tmp_path/'continue.sh').exists()

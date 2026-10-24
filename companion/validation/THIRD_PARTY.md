@@ -4,3 +4,5 @@
 - `tesnav/app/libs/onnxruntime-android-1.23.2.aar`：原交付采用的 Maven ONNX Runtime Android 1.23.2，不是本项目重新编译产物。官方项目 https://github.com/microsoft/onnxruntime ，许可 MIT；官方许可与第三方通知位于该项目对应版本的 LICENSE / ThirdPartyNotices.txt。
 - Android / iOS 工程其他依赖由 Gradle、CocoaPods 等原工程配置声明。各组件沿用自身许可；本项目根目录许可证不替换第三方模型或 SDK 的许可。
 - R10 APK 保留其原始签名和依赖；高德 SDK 的构建 Key / 签名应由自行构建者按自己的应用配置，私钥不公开提供。
+
+- R11 新增 OpenCV Android 4.13.0（Apache-2.0）：https://opencv.org/license/ 。构建从官方 Maven AAR 移除重复的 libc++ 与桌面 ABI，以保留原导航运行库；没有修改 OpenCV 算法源代码。静态符号校验不等于真机兼容性验证。

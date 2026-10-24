@@ -59,13 +59,22 @@ class PhoneVisionService : Service() {
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TesNav:PhoneVision")
             .apply { acquire(10 * 60 * 1000L) }
         scope.launch {
+            var renewAt=SystemClock.elapsedRealtime()+5*60*1000L
             while (isActive) {
                 delay(250)
                 availability.expire(SystemClock.elapsedRealtime())
+                if (SystemClock.elapsedRealtime() >= renewAt) {
+                    wakeLock?.let { if (it.isHeld) it.release(); it.acquire(10*60*1000L) }
+                    renewAt=SystemClock.elapsedRealtime()+5*60*1000L
+                }
             }
         }
         job = scope.launch {
-            try { runVision(host, token) }
+            try {
+                if (settings.getBoolean("dual_camera", false)) {
+                    DualCameraSession(this@PhoneVisionService, host, token, cpuThreads, availability) { lastTimingReport=it }.run()
+                } else runVision(host, token)
+            }
             catch (e: Exception) { availability.unavailable(e.message ?: e.javaClass.simpleName) }
             finally { stopSelf() }
         }
@@ -111,12 +120,7 @@ class PhoneVisionService : Service() {
                 var streamId: String? = null
                 var activeHost: String? = null
                 var attempts = 0L; var accepted = 0L; var expired = 0L; var duplicates = 0L
-                var renewWakeAt = SystemClock.elapsedRealtime() + 5 * 60 * 1000L
                 while (currentCoroutineContext().isActive) {
-                    if (SystemClock.elapsedRealtime() >= renewWakeAt) {
-                        wakeLock?.let { if (it.isHeld) it.release(); it.acquire(10 * 60 * 1000L) }
-                        renewWakeAt = SystemClock.elapsedRealtime() + 5 * 60 * 1000L
-                    }
                     val start = SystemClock.elapsedRealtime()
                     var requestStarted = start
                     attempts++

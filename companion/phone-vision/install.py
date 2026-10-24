@@ -3,7 +3,7 @@
 from pathlib import Path
 import argparse,datetime,hashlib,json,os,pwd,secrets,shutil
 
-FILES=('phone_vision_bridge.py','start_bridge.sh','ensure_bridge.sh','phone-vision-bridge.service')
+FILES=('phone_vision_bridge.py','dual_camera_store.py','start_bridge.sh','ensure_bridge.sh','phone-vision-bridge.service')
 def install(source:Path,target:Path,legacy_roi:Path|None=None):
  target.mkdir(parents=True,exist_ok=True)
  token=target/'connection-code'

@@ -8,6 +8,7 @@ import argparse
 import base64
 from collections import OrderedDict
 import hmac
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -18,6 +19,19 @@ import threading
 import time
 
 MAX_AGE_NS = 800_000_000
+
+
+def camera_service_name(camera_name, available):
+  names = ('wideRoadCameraState',) if camera_name == 'wide' else ('narrowRoadCameraState', 'roadCameraState')
+  return next((name for name in names if name in available), None)
+
+
+def camera_stream_type(camera_name, stream_types):
+  names = ('VISION_STREAM_WIDE_ROAD',) if camera_name == 'wide' else ('VISION_STREAM_NARROW_ROAD', 'VISION_STREAM_ROAD')
+  for name in names:
+    if hasattr(stream_types, name):
+      return getattr(stream_types, name)
+  raise ValueError('unsupported_camera_stream')
 
 
 def read_observation(path, now_ns):
@@ -178,9 +192,10 @@ class FrameStore:
 
 class BridgeServer(ThreadingHTTPServer):
   daemon_threads = True
-  def __init__(self, address, token, store):
+  def __init__(self, address, token, store, dual_store=None, start_dual=None):
     super().__init__(address, Handler)
     self.token, self.store = token, store
+    self.dual_store, self.start_dual = dual_store, start_dual
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -206,6 +221,13 @@ class Handler(BaseHTTPRequestHandler):
   def do_GET(self):
     if not self.authorized():
       return self.respond(401, {'error': 'authentication'})
+    if self.path == '/v2/pair' and self.server.dual_store is not None:
+      try:
+        if self.server.start_dual is not None:
+          self.server.start_dual()
+        return self.respond(200, self.server.dual_store.issue())
+      except ValueError as e:
+        return self.respond(503, {'error': str(e)})
     if self.path != '/v1/frame':
       return self.respond(404, {'error': 'not_found'})
     try:
@@ -216,7 +238,8 @@ class Handler(BaseHTTPRequestHandler):
   def do_POST(self):
     if not self.authorized():
       return self.respond(401, {'error': 'authentication'})
-    if self.path != '/v1/observation':
+    dual = self.path == '/v2/observation' and self.server.dual_store is not None
+    if self.path != '/v1/observation' and not dual:
       return self.respond(404, {'error': 'not_found'})
     try:
       length = int(self.headers.get('Content-Length', '0'))
@@ -225,7 +248,7 @@ class Handler(BaseHTTPRequestHandler):
       data = json.loads(self.rfile.read(length))
       if not isinstance(data, dict):
         raise ValueError('body_type')
-      self.server.store.accept(data)
+      (self.server.dual_store if dual else self.server.store).accept(data)
       self.respond(200, {'accepted': True, 'control_eligible': False})
     except (ValueError, TypeError) as e:
       self.respond(400, {'error': str(e)})
@@ -258,32 +281,61 @@ def camera_frames(make_client, clock=time.monotonic, sleep=time.sleep):
     yield client, buf
 
 
-def capture(store, roi_path, hz):
+def output_frame_size(width, height, max_width=960):
+  if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+    raise ValueError('invalid camera dimensions')
+  if max_width not in (0, 960, 1280, 1928):
+    raise ValueError('unsupported frame width')
+  # No camera reconfiguration or upscaling; change only the transport image.
+  scale = min(1., (max_width or 1928)/width, 1208/height)
+  return max(1, round(width*scale)), max(1, round(height*scale))
+
+
+def capture(store, roi_path, hz, max_width=960, jpeg_quality=75, camera_name='wide', dual_store=None):
   import cv2
   import numpy as np
   from msgq.visionipc import VisionIpcClient
   from openpilot.cereal.visionipc import VisionStreamType
   from openpilot.cereal import messaging
+  from openpilot.cereal.services import SERVICE_LIST
   from openpilot.common.transformations.camera import DEVICE_CAMERAS, get_view_frame_from_calib_frame, view_frame_from_device_frame
   from openpilot.common.transformations.orientation import rot_from_euler
   cv2.setNumThreads(1)
   roi = json.loads(Path(roi_path).read_text())
-  sm = messaging.SubMaster(['deviceState', 'carState', 'extrinsicsCalibration', 'wideRoadCameraState'])
-  make_client = lambda: VisionIpcClient('camerad', VisionStreamType.VISION_STREAM_WIDE_ROAD, conflate=True)
+  camera_service = camera_service_name(camera_name, SERVICE_LIST)
+  if camera_service is None:
+    raise ValueError('camera_metadata_service_missing')
+  stream = camera_stream_type(camera_name, VisionStreamType)
+  sm = messaging.SubMaster(['deviceState', 'carState', 'extrinsicsCalibration', camera_service])
+  make_client = lambda: VisionIpcClient('camerad', stream, conflate=True)
   previous_client = None
+  last_encoded = float('-inf')
+  try:
+    device_id = hashlib.sha256(Path('/etc/machine-id').read_bytes().strip()).hexdigest()[:24]
+  except OSError:
+    device_id = None
   for client, buf in camera_frames(make_client):
     if client is not previous_client:
-      store.new_stream()
+      if camera_name == 'wide':
+        store.new_stream()
+      if dual_store is not None:
+        dual_store.reset()
       previous_client = client
     started = time.monotonic()
     capture_ns = int(client.timestamp_eof)
     if not 0 <= time.monotonic_ns()-capture_ns <= MAX_AGE_NS:
       continue
-    store.camera_seen(capture_ns)
+    if camera_name == 'wide':
+      store.camera_seen(capture_ns)
     # Native IPC is conflated: drain cheaply, encode only when a phone asks.
     # Never accumulate a queue; hz is a hard maximum for JPEG work.
-    if not store.claim_capture(started, hz):
+    if started-last_encoded < 1/hz:
       continue
+    single_requested = camera_name == 'wide' and store.claim_capture(started, hz)
+    dual_requested = dual_store is not None and dual_store.claim_capture(camera_name, started, hz)
+    if not single_requested and not dual_requested:
+      continue
+    last_encoded = started
     sm.update(0)
     # Copy before the next recv: camera buffers belong to vision IPC.
     raw = np.frombuffer(buf.data, dtype=np.uint8)
@@ -291,33 +343,62 @@ def capture(store, roi_path, hz):
     y = raw[:stride*h].reshape(h, stride)[:, :w]
     uv = raw[int(buf.uv_offset):int(buf.uv_offset)+stride*(h//2)].reshape(h//2, stride)[:, :w]
     bgr = cv2.cvtColor(np.vstack((y, uv)), cv2.COLOR_YUV2BGR_NV12)
-    width = 960
-    height = round(h*width/w)
-    bgr = cv2.resize(bgr, (width, height))
-    inv = None
+    width, height = output_frame_size(w, h, max_width)
+    if (width, height) != (w, h):
+      bgr = cv2.resize(bgr, (width, height), interpolation=cv2.INTER_AREA)
+    inv, intrinsics, view_rotation, calibration_id, view_from_calib = None, None, None, None, None
     try:
+      camera_fresh = all(sm.seen[s] and sm.alive[s] and sm.valid[s] for s in (camera_service, 'deviceState'))
+      if not camera_fresh:
+        raise ValueError('camera profile unavailable')
+      configs = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm[camera_service].sensor))]
+      camera = configs.wide_road if camera_name == 'wide' else configs.narrow_road
+      if (w, h) != (camera.width, camera.height):
+        raise ValueError('source camera geometry changed')
+      k = camera.intrinsics.copy().astype(float)
+      k[0] *= width/camera.width
+      k[1] *= height/camera.height
+      intrinsics = k.reshape(-1).tolist()
+      # Intrinsic/profile identity is available during parked calibration even
+      # when the onroad live ground-pose producer is intentionally not running.
+      profile = [camera_name, str(sm['deviceState'].deviceType), str(sm[camera_service].sensor),
+                 w, h, width, height, camera.focal_length]
+      calibration_id = hashlib.sha256(json.dumps(profile).encode()).hexdigest()[:24]
       cal = sm['extrinsicsCalibration']
-      fresh = all(sm.seen[s] and sm.alive[s] and sm.valid[s] for s in ('extrinsicsCalibration', 'wideRoadCameraState', 'deviceState'))
+      fresh = all(sm.seen[s] and sm.alive[s] and sm.valid[s] for s in ('extrinsicsCalibration', camera_service, 'deviceState'))
       age = time.monotonic_ns()-sm.logMonoTime['extrinsicsCalibration']
       if fresh and 0 <= age <= 2_000_000_000 and str(cal.calStatus) == 'calibrated' and len(cal.height) and .5 <= cal.height[0] <= 3:
-        camera = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['wideRoadCameraState'].sensor))].wide_road
-        k = camera.intrinsics.copy().astype(float)
-        k[0] *= width/camera.width
-        k[1] *= height/camera.height
         view = get_view_frame_from_calib_frame(*cal.rpyCalib, float(cal.height[0]))
-        wide_rotation = view_frame_from_device_frame @ rot_from_euler(cal.wideFromDeviceEuler) @ view_frame_from_device_frame.T
-        projection = k @ wide_rotation @ view
-        inv = np.linalg.inv(projection[:, [0, 1, 3]]).reshape(-1).tolist()
+        rotation = (view_frame_from_device_frame @ rot_from_euler(cal.wideFromDeviceEuler) @ view_frame_from_device_frame.T
+                    if camera_name == 'wide' else np.eye(3))
+        projection = k @ rotation @ view
+        inverse = np.linalg.inv(projection[:, [0, 1, 3]])
+        if not np.isfinite(inverse).all():
+          raise ValueError('invalid ground projection')
+        inv = inverse.reshape(-1).tolist()
+        intrinsics = k.reshape(-1).tolist()
+        view_rotation = rotation.reshape(-1).tolist()
+        view_from_calib = (rotation @ view).reshape(-1).tolist()
     except (KeyError, ValueError, np.linalg.LinAlgError):
       pass
-    ok, jpg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    ok, jpg = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
     if ok:
       car_fresh = sm.seen['carState'] and sm.alive['carState'] and sm.valid['carState'] and 0 <= time.monotonic_ns()-sm.logMonoTime['carState'] <= 250_000_000
-      store.publish(dict(version=1, frame_id=int(client.frame_id), capture_mono_ns=capture_ns,
+      speed = float(sm['carState'].vEgo) if car_fresh else None
+      speed = speed if speed is not None and math.isfinite(speed) else None
+      packet = dict(version=1, frame_id=int(client.frame_id), capture_mono_ns=capture_ns,
                          width=width, height=height, jpeg_b64=base64.b64encode(jpg).decode(),
-                         ego_speed_mps=float(sm['carState'].vEgo) if car_fresh else None,
+                         ego_speed_mps=speed,
                          ground_inverse=inv, roi=roi, jpeg_bytes=len(jpg),
-                         bridge_processing_ms=(time.monotonic()-started)*1000))
+                         bridge_processing_ms=(time.monotonic()-started)*1000,
+                         camera_id=camera_name, calibration_id=calibration_id, device_id=device_id,
+                         camera_matrix=intrinsics, view_rotation=view_rotation,
+                         view_from_calib=view_from_calib,
+                         source_width=w, source_height=h, stereo_calibrated=False)
+      if single_requested:
+        store.publish(packet)
+      if dual_requested:
+        dual_store.publish(camera_name, packet)
 
 
 def main():
@@ -327,21 +408,65 @@ def main():
   p.add_argument('--token-file', type=Path, required=True)
   p.add_argument('--roi', default='/data/wide-capture/roi.json')
   p.add_argument('--hz', type=float, default=5)
+  p.add_argument('--frame-width', type=int, choices=(0, 960, 1280, 1928), default=960, help='0 keeps source dimensions within 1928x1208; no upscaling')
+  p.add_argument('--jpeg-quality', type=int, choices=range(75, 96), default=75)
   p.add_argument('--output', type=Path, default=Path('/dev/shm/phone_side_vehicles.json'))
+  p.add_argument('--dual-camera', action='store_true', help='enable separate read-only /v2 endpoints; narrow capture starts on demand')
+  p.add_argument('--dual-output', type=Path, default=Path('/dev/shm/phone_dual_vehicles.json'))
+  p.add_argument('--stereo-calibration', type=Path, help='optional identical validated calibration file approved on C3 and phone')
   args = p.parse_args()
+  if args.stereo_calibration and not args.dual_camera:
+    p.error('stereo calibration requires --dual-camera')
   if not math.isfinite(args.hz) or not 2 <= args.hz <= 10:
     p.error('hz must be 2..10 (maximum on-demand encode rate)')
   token = args.token_file.read_text().strip()
   if len(token) < 32:
     p.error('connection code must have at least 32 characters')
   store = FrameStore(args.output)
+  dual = None
+  if args.dual_camera:
+    from dual_camera_store import DualCameraStore
+    if args.dual_output == args.output:
+      p.error('dual output must be separate from legacy observation')
+    calibration_sha = None
+    if args.stereo_calibration:
+      raw = args.stereo_calibration.read_bytes()
+      if not 0 < len(raw) <= 65_536:
+        p.error('invalid stereo calibration file size')
+      calibration = json.loads(raw)
+      if (calibration.get('validated') is not True or calibration.get('units') != 'metres' or
+          calibration.get('calibration_pairs', 0) < 15 or calibration.get('validation_pairs', 0) < 5 or
+          any(type(calibration.get(k)) not in (int, float) or not 0 <= calibration[k] <= 1
+              for k in ('stereo_rms_px', 'heldout_rms_px'))):
+        p.error('stereo calibration did not pass quality gates')
+      calibration_sha = hashlib.sha256(raw).hexdigest()
+    dual = DualCameraStore(args.dual_output, stereo_sha256=calibration_sha)
   def watchdog():
     while True:
       store.expire()
+      if dual is not None:
+        dual.expire()
       time.sleep(.2)
   threading.Thread(target=watchdog, daemon=True).start()
-  threading.Thread(target=capture, args=(store, args.roi, args.hz), daemon=True).start()
-  with BridgeServer((args.bind, args.port), token, store) as server:
+  def capture_worker(camera_name, hz):
+    while True:
+      try:
+        capture(store, args.roi, hz, args.frame_width, args.jpeg_quality, camera_name, dual)
+      except Exception as error:
+        if camera_name == 'wide':
+          store.new_stream()
+        if dual is not None:
+          dual.reset()
+        print(f'{camera_name} capture restarting: {type(error).__name__}', flush=True)
+        time.sleep(1)
+  threading.Thread(target=capture_worker, args=('wide', args.hz), daemon=True).start()
+  narrow_lock, narrow_started = threading.Lock(), [False]
+  def start_dual():
+    with narrow_lock:
+      if not narrow_started[0]:
+        threading.Thread(target=capture_worker, args=('narrow', min(args.hz, 4)), daemon=True).start()
+        narrow_started[0] = True
+  with BridgeServer((args.bind, args.port), token, store, dual, start_dual) as server:
     server.serve_forever()
 
 
