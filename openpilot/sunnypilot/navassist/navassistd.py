@@ -20,6 +20,7 @@ from openpilot.sunnypilot.navassist.udp_receiver import NavAssistUDPServer, UDP_
 from openpilot.sunnypilot.navassist.diagnostics import ingress_status_path
 from openpilot.sunnypilot.navassist.lane_position import estimate_ego_lane
 from openpilot.sunnypilot.navassist.settings import atomic_json
+from openpilot.sunnypilot.navassist.trial_export import TrialExporter
 
 
 LISTEN_HOST = "0.0.0.0"
@@ -182,7 +183,8 @@ def main() -> None:
 
   store = NavAssistStore(checkpoint_path=REPLAY_CHECKPOINT_PATH)
   server = NavAssistHTTPServer((LISTEN_HOST, LISTEN_PORT), store, identity, pairing)
-  udp_server = NavAssistUDPServer((LISTEN_HOST, UDP_SNAPSHOT_PORT), store)
+  udp_server = NavAssistUDPServer((LISTEN_HOST, UDP_SNAPSHOT_PORT), store,
+                                trial_enabled=lambda: params.get_bool("JetlinkNavTrialEnabled"))
   try:
     discovery_server = NavAssistDiscoveryServer(
       (DISCOVERY_HOST, DISCOVERY_PORT), identity, pairing, is_offroad=lambda: params.get_bool("IsOffroad"),
@@ -196,6 +198,7 @@ def main() -> None:
     target=discovery_server.serve_forever, name="navassist-discovery", daemon=True,
   )
   udp_thread = threading.Thread(target=udp_server.serve_forever, name="navassist-udp", daemon=True)
+  trial_exporter = TrialExporter(store, udp_server.route_geometry, lambda: params.get_bool("JetlinkNavTrialEnabled"))
   server_started = False
   discovery_started = False
   udp_started = False
@@ -206,6 +209,7 @@ def main() -> None:
     discovery_started = True
     udp_thread.start()
     udp_started = True
+    trial_exporter.thread.start()
     cloudlog.warning(
       "navassistd receiver online on HTTP port %d, discovery port %d and data-only UDP port %d",
       LISTEN_PORT, DISCOVERY_PORT, UDP_SNAPSHOT_PORT,
@@ -237,6 +241,7 @@ def main() -> None:
       pm.send("navAssistStateSP", message)
       ratekeeper.keep_time()
   finally:
+    trial_exporter.close()
     if udp_started:
       udp_server.shutdown()
     if discovery_started:

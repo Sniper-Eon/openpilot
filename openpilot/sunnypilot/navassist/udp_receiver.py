@@ -10,6 +10,7 @@ from openpilot.sunnypilot.navassist.position_feedback import REQUEST_TYPE, lane_
 
 from openpilot.sunnypilot.navassist.protocol import NavAssistProtocolError, NavAssistStore
 from openpilot.sunnypilot.navassist.server import ClientRateLimiter
+from openpilot.sunnypilot.navassist.route_geometry import RouteGeometryCache
 
 
 UDP_SNAPSHOT_PORT = 4213
@@ -31,7 +32,9 @@ class NavAssistUDPServer:
   """
 
   def __init__(self, address: tuple[str, int], store: NavAssistStore, *,
-               rate_limiter: ClientRateLimiter | None = None):
+               rate_limiter: ClientRateLimiter | None = None, trial_enabled=lambda: False):
+    self.trial_enabled = trial_enabled
+    self.route_geometry = RouteGeometryCache()
     self._accepted_source = None
     self.store = store
     self.rate_limiter = rate_limiter or ClientRateLimiter()
@@ -60,6 +63,13 @@ class NavAssistUDPServer:
   def serve_forever(self) -> None:
     while not self._stopping.is_set():
       try:
+        trial_enabled = self.trial_enabled() is True
+      except Exception:
+        trial_enabled = False
+      if not trial_enabled:
+        with self.route_geometry.lock:
+          self.route_geometry._clear()
+      try:
         body, address = self._socket.recvfrom(MAX_UDP_SNAPSHOT_BYTES + 1)
       except TimeoutError:
         continue
@@ -83,6 +93,23 @@ class NavAssistUDPServer:
         query = json.loads(body)
       except (ValueError, UnicodeDecodeError):
         query = None
+      if isinstance(query, dict) and query.get('messageType') in ('route_geometry_hello', 'route_geometry_chunk'):
+        try:
+          if self.trial_enabled() is not True:
+            with self.route_geometry.lock:
+              self.route_geometry._clear()
+            continue
+          if self._accepted_source != source_host:
+            continue
+          ack = self.route_geometry.accept(body, self.store.current(), time.monotonic_ns())
+          self._socket.sendto(json.dumps(ack, allow_nan=False, separators=(',', ':')).encode(), address)
+        except (ValueError, OSError):
+          self._reject_record('routeGeometry')
+        except Exception:
+          with self.route_geometry.lock:
+            self.route_geometry._clear()
+          self._reject_record('routeGeometryFault')
+        continue
       if isinstance(query, dict) and query.get('messageType') == REQUEST_TYPE:
         current = self.store.current()
         if (len(body) <= 512 and set(query) == {'messageType', 'sessionId', 'sequence'} and

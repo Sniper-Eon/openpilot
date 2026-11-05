@@ -92,14 +92,40 @@ grayscale 0..255, float32 `navigation (1,47)` and `captured_monotonic_ns`.
 Map rendering exceeding the observation lifetime is rejected. EOF/error clears
 the output; rereading a file never renews its lifetime.
 
-**Live phone-to-producer integration is not completed.** This older branch
-publishes `navAssistStateSP`, not the current xpilot `navassist/nav.state`, and
-does not publish the complete route used by the newer xpilot branch. The JSON
-contract must be fed from a verified route/position source before claiming live
-navigation. Without it the model receives zero navigation inputs. Do not reuse
-the newer branch's telemetry adapter blindly or label that zero-map run as a
-navigation success. Clock synchronization, source freshness, route identity and
-camera/context alignment need a real-device check.
+The source now accepts the current companion's `route_geometry_hello/chunk`
+protocol on the existing UDP port 4213. Route transfers are bound to the accepted
+snapshot source, session, revision and coordinate system. The independent
+`JetlinkNavTrialEnabled` master defaults off; disabling clears the route cache
+and private export. No phone identity or installation is changed.
+
+A separate worker exports qualified realtime phone GPS and the complete route
+to `/dev/shm/jetlink_nav_context.json` with mode 0600. Route chunks do not renew
+snapshot TTL. Missing/weak/stale GPS, an inactive/unmatched route, clock skew,
+master failure or revision mismatch clears the export. GCJ02 route and position
+use the same approximate WGS84 conversion; this is experimental map input,
+not evidence of an absolute vehicle lane.
+
+After a separately authorized device deployment and activation, the Mac can
+read the private export over authenticated SSH:
+
+```sh
+python -m tools.nav_bigmodel.pull_context --host comma@DEVICE --identity /absolute/path/ssh-key | \
+  python -m tools.nav_bigmodel.render_context \
+    --archive-url https://build.protomaps.com/20251201.pmtiles \
+    --cache /absolute/private/path/map-cache \
+    --output /absolute/private/path/nav-context.npz
+```
+
+This command does not install, enable or restart anything. The helper must
+already exist on the device. The image/inference link remains Jetlink; SSH only
+carries route context. Monotonic clocks are translated by preserving remote
+observation age and conservatively charging the full request round trip.
+Repeated reads cannot renew source lifetime. EOF/errors invalidate context.
+The exporter deliberately keeps the 47-vector zero until phone maneuver and
+distance-reference semantics are verified; the route map still carries direction.
+
+**Only local source/socket tests have passed for this adapter.** Live phone,
+C3-to-Mac SSH latency, physical USB and camera/context alignment remain untested.
 
 ## Checks and deployment status
 
@@ -116,7 +142,7 @@ a physical USB, C3 native build, activation or road test. See REPORT.md for
 the measured results and the unresolved native-build checks.
 
 Source preparation never changes the running device. Before installation:
-complete the phone route producer, C3 native build including the new Params
+validate the live phone route producer, C3 native build including the new Params
 key, physical USB/frame-age test and a parked shadow test. Current ~74 ms
 loopback inference is slower than the 50 ms/20 Hz model budget. This branch
 does not relax the budget or enable control to hide that limitation.

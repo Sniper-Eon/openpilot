@@ -61,8 +61,9 @@ restart, OS flashing or vehicle activation occurred.
 The Mac receives images/scalars through Jetlink. Its separate map/context
 producer has an explicit normalized JSON and atomic NPZ contract. The old base's
 `navAssistStateSP` does not carry the complete route and is not the newer xpilot
-plugin message ABI. Live phone route/position production is still unconnected;
-this branch therefore must not be described as end-to-end live navigation ready.
+plugin message ABI. The route intake/export and Mac SSH reader are now implemented in source, but
+have not been exercised with the live phone/device. This branch must not be
+described as end-to-end live navigation ready.
 Missing context produces zero navigation inputs, visibly distinct in the test
 contract from a navigation validation success.
 
@@ -71,3 +72,27 @@ revision and freshness verification; C3 native build; physical USB and camera
 warp/frame-age checks; parked shadow activation. Closed-loop route selection
 and road validation remain unproven. External model control is deliberately
 unavailable in this preparation branch; local small-model driving is retained.
+
+
+## Route transport preparation, 2026-11-05 follow-up
+
+- Ported only the bounded geometry cache from the user's xpilot-plugins commit
+  `219ea9ef7c360f73797a91691afa34e41399e0f9`; no newer host hooks or message ABI.
+  Upstream host specification revision remains
+  `3f16c92d531bf6f4d9edf15d4696a89f72056523`.
+- Added default-off route intake on the existing UDP endpoint, private atomic
+  export on a separate worker and read-only Mac SSH context translation.
+- Fixed renderer freshness to include transport/queue delay for GPS and commands.
+  The new test failed on the old renderer; the new socket test failed on the old
+  receiver constructor. Clock translation also has a regression rejecting combined
+  remote age and round-trip delay exceeding 500 ms.
+- Tests use synthetic phone packets and real localhost UDP sockets. No real phone,
+  SSH device stream, USB model frames or driving outputs were used in this step.
+- Command vector remains zero: only the complete route map supplies direction.
+  Phone maneuver distance semantics remain unresolved. Conversion is approximate.
+- No C3 installation, activation, firmware build or road validation performed.
+- Final scoped checks: `unittest discover -s tools/nav_bigmodel -p 'test_*.py'`
+  **15 passed**; `pytest` on `test_protocol.py` and `test_udp_receiver.py`
+  **17 passed**; changed Python compile checks and `git diff --check` exit 0.
+  Tests importing the existing UDP receiver require the project's cryptography
+  dependency (installed only in the temporary Mac test environment).

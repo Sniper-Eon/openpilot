@@ -60,12 +60,14 @@ def render(packet, renderer, tracker=None):
   stamp = packet.get('captured_monotonic_ns', 0) / 1e9
   if packet.get('active') is not True or packet.get('coordinate_system') != 'wgs84':
     raise ValueError('Active WGS84 route required')
-  if not 0 <= time.monotonic() - stamp < 0.5:
+  transit = time.monotonic() - stamp
+  if not 0 <= transit < 0.5:
     raise ValueError('Expired observation; timestamp must use this Mac monotonic clock')
   position = packet['position']
   age = float(position['age_ms']) / 1000
-  if position.get('has_fix') is not True or not 0 <= age < 2:
+  if position.get('has_fix') is not True or not 0 <= age or not age + transit < 2:
     raise ValueError('Unqualified position')
+  age += transit
   route = np.asarray(packet['route'], dtype=np.float64)
   if route.ndim != 2 or route.shape[1] != 2 or not 2 <= len(route) <= 100000 or not np.isfinite(route).all():
     raise ValueError('Invalid route')
@@ -82,7 +84,8 @@ def render(packet, renderer, tracker=None):
     image[:] = 0
   nav = np.zeros((1, 47), np.float32)
   guidance = packet.get('guidance', {})
-  if guidance.get('valid') is True and 0 <= float(guidance.get('age_ms', -1)) < 2000:
+  guidance_age = float(guidance.get('age_ms', -1)) / 1000
+  if guidance.get('valid') is True and 0 <= guidance_age and guidance_age + transit < 2:
     command, distance = guidance.get('command'), float(guidance.get('distance_m', -1))
     if type(command) is int and command in COMMANDS and np.isfinite(distance) and distance >= 0:
       nav[0, command], nav[0, 46] = 1, distance / 100
