@@ -39,22 +39,22 @@ def test_standard_profile_does_not_apply_c3xl_allowlist() -> None:
   validate_agnos_manifest(manifest, HardwareProfile.STANDARD)
 
 
-def test_standard_manifest_is_official_agnos_19_7() -> None:
+def test_standard_manifest_is_official_agnos_19_9() -> None:
   partitions = {partition["name"]: partition for partition in read_manifest(STANDARD_MANIFEST)}
   assert partitions["abl"]["hash"] == "29fd7ed1c012e599420764840f9f11286d34dbff4adaf102a447f06d8c5e0b35"
-  assert partitions["boot"]["hash"] == "6ecf6f987cd11968104abcccabbe268485d329cdb73012dfd3c381a6b8deb27d"
-  assert partitions["system"]["hash_raw"] == "3c271e2b3d20d2f0a8bf6555a1319f3efb12845490967d6151195174a01e912f"
+  assert partitions["boot"]["hash"] == "b9c9b9261fca0cef9e6d9b198fa4b563767e6342afc7a61ab137b2b519260615"
+  assert partitions["system"]["hash_raw"] == "80d9373348ddff2a5d1f534fab3420383939c96f3eba60baab6b15339fc602c7"
 
 
-def test_c3xl_manifest_uses_official_19_7_system_with_validated_boot_chain() -> None:
+def test_c3xl_manifest_uses_official_19_9_system_with_validated_boot_chain() -> None:
   partitions = {partition["name"]: partition for partition in read_manifest(C3XL_MANIFEST)}
   assert partitions["boot"]["hash"] == "0191529aa97d90d1fa04b472d80230b777606459e1e1e9e2323c9519839827b4"
-  assert partitions["system"]["hash_raw"] == "3c271e2b3d20d2f0a8bf6555a1319f3efb12845490967d6151195174a01e912f"
+  assert partitions["system"]["hash_raw"] == "80d9373348ddff2a5d1f534fab3420383939c96f3eba60baab6b15339fc602c7"
 
 
 @pytest.mark.parametrize("profile,version,manifest", [
-  ("standard", "19.7", "openpilot/common/hardware/comma/agnos.json"),
-  ("c3xl", "19.7", "openpilot/common/hardware/comma/agnos-c3xl.json"),
+  ("standard", "19.9", "openpilot/common/hardware/comma/agnos.json"),
+  ("c3xl", "19.9", "openpilot/common/hardware/comma/agnos-c3xl.json"),
 ])
 def test_launch_environment_selects_profile_specific_agnos(profile: str, version: str, manifest: str) -> None:
   env = os.environ.copy()
@@ -75,7 +75,7 @@ def test_updater_reads_real_shell_configuration_and_skips_installed_os(monkeypat
   from openpilot.common.hardware.comma import agnos
   monkeypatch.setenv('SUNNYPILOT_HARDWARE_PROFILE', 'c3xl')
   monkeypatch.setattr(updated, 'OVERLAY_MERGED', str(REPO_ROOT))
-  monkeypatch.setattr(updated.HARDWARE, 'get_os_version', lambda: '19.7')
+  monkeypatch.setattr(updated.HARDWARE, 'get_os_version', lambda: '19.9')
   monkeypatch.setattr(agnos, 'flash_agnos_update', lambda *a: pytest.fail('Must not flash an already installed OS'))
   updated.handle_agnos_update()
 
@@ -98,7 +98,7 @@ def test_fresh_install_upgrade_passes_existing_validated_manifest(monkeypatch):
 
 
 @pytest.mark.parametrize('model_name,manifest', [
-  ('comma tici', C3XL_MANIFEST), ('comma tizi', STANDARD_MANIFEST),
+  ('comma tici', STANDARD_MANIFEST.with_name('agnos-c3.json')), ('comma tizi', STANDARD_MANIFEST),
 ])
 def test_factory_reset_without_profile_file_uses_device_model(tmp_path, model_name, manifest):
   model = tmp_path / 'model'

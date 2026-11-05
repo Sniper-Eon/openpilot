@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# This prebuilt channel targets devices without a cabin camera.
+# Preserve the selected baseline cabin-camera policy.
 export DISABLE_DRIVER=1
 
 export OMP_NUM_THREADS=1
@@ -18,29 +18,28 @@ export VECLIB_MAXIMUM_THREADS=1
 # headroom for this until ui is moved to the CPU.
 export QCOM_PRIORITY=12
 
-SP_PROFILE_VALUE="${SUNNYPILOT_HARDWARE_PROFILE:-}"
-SP_PROFILE_FILE="${SUNNYPILOT_HARDWARE_PROFILE_FILE:-/data/hardware_profile}"
-SP_MODEL_FILE="${SUNNYPILOT_HARDWARE_MODEL_FILE:-/sys/firmware/devicetree/base/model}"
-if [ -z "$SP_PROFILE_VALUE" ] && [ -f "$SP_PROFILE_FILE" ]; then
-  SP_PROFILE_VALUE="$(tr -d '\000\r\n ' < "$SP_PROFILE_FILE")"
-fi
-if [ -z "$SP_PROFILE_VALUE" ]; then
-  SP_MODEL_VALUE=""
-  if [ -f "$SP_MODEL_FILE" ]; then
-    SP_MODEL_VALUE="$(tr -d '\000\r\n' < "$SP_MODEL_FILE")"
-  fi
-  [ "$SP_MODEL_VALUE" = "comma tici" ] && SP_PROFILE_VALUE="c3xl" || SP_PROFILE_VALUE="standard"
-fi
-
-if [ "$SP_PROFILE_VALUE" = "c3xl" ]; then
-  # Use the actual version of the system image in the C3XL manifest.
-  # The validated C3XL boot chain is selected by the manifest below.
-  [ -z "$AGNOS_VERSION" ] && export AGNOS_VERSION="19.7"
-  [ -z "$AGNOS_MANIFEST_FILE" ] && export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-c3xl.json"
-else
-  [ -z "$AGNOS_VERSION" ] && export AGNOS_VERSION="19.7"
-  [ -z "$AGNOS_MANIFEST_FILE" ] && export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos.json"
-fi
-unset SP_PROFILE_VALUE SP_PROFILE_FILE SP_MODEL_FILE SP_MODEL_VALUE
+export AGNOS_VERSION="19.9"
 
 export STAGING_ROOT="/data/safe_staging"
+
+# Boot images follow the explicit physical profile, never a branch label.
+profile_value="${SUNNYPILOT_HARDWARE_PROFILE:-}"
+profile_file="${SUNNYPILOT_HARDWARE_PROFILE_FILE:-/data/hardware_profile}"
+if [ -z "$profile_value" ] && [ -f "$profile_file" ]; then
+  profile_value="$(cat "$profile_file")" || exit 1
+  [ -n "$profile_value" ] || { echo "Empty hardware profile: $profile_file" >&2; exit 1; }
+fi
+case "$profile_value" in
+  ""|standard|c3xl) ;;
+  *) echo "Unsupported hardware profile: $profile_value" >&2; exit 1 ;;
+esac
+export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos.json"
+if [ "$profile_value" = "c3xl" ]; then
+  export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-c3xl.json"
+elif [ -r "${SUNNYPILOT_HARDWARE_MODEL_FILE:-/sys/firmware/devicetree/base/model}" ] && \
+     [ "$(tr -d '\000' < "${SUNNYPILOT_HARDWARE_MODEL_FILE:-/sys/firmware/devicetree/base/model}")" = "comma tici" ]; then
+  export AGNOS_MANIFEST_FILE="openpilot/common/hardware/comma/agnos-c3.json"
+fi
+
+SP_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$SP_SOURCE_ROOT:$SP_SOURCE_ROOT/opendbc_repo:$SP_SOURCE_ROOT/msgq_repo:$SP_SOURCE_ROOT/tinygrad_repo:$SP_SOURCE_ROOT/rednose_repo${PYTHONPATH:+:$PYTHONPATH}"

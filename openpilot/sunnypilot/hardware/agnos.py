@@ -1,5 +1,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import os
+from pathlib import Path
 
 from openpilot.sunnypilot.hardware.profile import HardwareProfile, get_hardware_profile
 
@@ -52,18 +54,49 @@ C3XL_BOOT_CHAIN_ALLOWLIST: Mapping[str, BootChainImage] = {
 }
 
 
+# C3/tici requires the independent mr-one/c3-dev@1ec51c0e boot chain.
+# A newer stock 3X/four ABL can reject C3 before Linux starts.
+C3_BOOT_CHAIN_ALLOWLIST: Mapping[str, BootChainImage] = {
+  "xbl": BootChainImage(
+    hash="e8acf2a9cc7f0ce84cb803bfea9477f765c0d7b4daf26048e59651b9e6a7bfbb",
+    hash_raw="e8acf2a9cc7f0ce84cb803bfea9477f765c0d7b4daf26048e59651b9e6a7bfbb",
+    size=3282256,
+  ),
+  "xbl_config": BootChainImage(
+    hash="758552ecf92b5569677197783bf0ccb73d7f961685308e45d3276ac9dd974f85",
+    hash_raw="758552ecf92b5569677197783bf0ccb73d7f961685308e45d3276ac9dd974f85",
+    size=98124,
+  ),
+  "abl": BootChainImage(
+    hash="32a2174b5f764e95dfc54cf358ba01752943b1b3b90e626149c3da7d5f1830b6",
+    hash_raw="32a2174b5f764e95dfc54cf358ba01752943b1b3b90e626149c3da7d5f1830b6",
+    size=274432,
+  ),
+  "boot": BootChainImage(
+    hash="0191529aa97d90d1fa04b472d80230b777606459e1e1e9e2323c9519839827b4",
+    hash_raw="0191529aa97d90d1fa04b472d80230b777606459e1e1e9e2323c9519839827b4",
+    size=18515968,
+  ),
+}
+
+
 def validate_agnos_manifest(partitions: Sequence[dict], profile: HardwareProfile | None = None) -> None:
-  if (profile or get_hardware_profile()) != HardwareProfile.C3XL:
-    return
+  if (profile or get_hardware_profile()) == HardwareProfile.C3XL:
+    device, allowlist = "C3XL", C3XL_BOOT_CHAIN_ALLOWLIST
+  else:
+    model_file = Path(os.getenv("SUNNYPILOT_HARDWARE_MODEL_FILE", "/sys/firmware/devicetree/base/model"))
+    if not model_file.is_file() or model_file.read_bytes().rstrip(b"\0\r\n ") != b"comma tici":
+      return
+    device, allowlist = "C3", C3_BOOT_CHAIN_ALLOWLIST
 
   by_name = {partition.get("name"): partition for partition in partitions}
   if len(by_name) != len(partitions):
     raise UnsafeBootChainManifest("AGNOS manifest contains duplicate or unnamed partitions")
 
-  for name, allowed in C3XL_BOOT_CHAIN_ALLOWLIST.items():
+  for name, allowed in allowlist.items():
     partition = by_name.get(name)
     if partition is None:
-      raise UnsafeBootChainManifest(f"C3XL AGNOS manifest is missing required boot-chain partition {name!r}")
+      raise UnsafeBootChainManifest(f"{device} AGNOS manifest is missing required boot-chain partition {name!r}")
 
     actual = BootChainImage(
       hash=str(partition.get("hash", "")).lower(),
@@ -72,8 +105,8 @@ def validate_agnos_manifest(partitions: Sequence[dict], profile: HardwareProfile
     )
     if actual != allowed:
       raise UnsafeBootChainManifest(
-        f"C3XL refuses unvalidated {name!r} image: expected hash={allowed.hash} size={allowed.size}, got hash={actual.hash} size={actual.size}"
+        f"{device} refuses unvalidated {name!r} image: expected hash={allowed.hash} size={allowed.size}, got hash={actual.hash} size={actual.size}"
       )
 
     if partition.get("has_ab", True) is not True or partition.get("full_check", False) is not True:
-      raise UnsafeBootChainManifest(f"C3XL requires full A/B verification for boot-chain partition {name!r}")
+      raise UnsafeBootChainManifest(f"{device} requires full A/B verification for boot-chain partition {name!r}")
