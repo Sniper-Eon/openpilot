@@ -1,0 +1,1 @@
+Source: commaai/openpilot commit afbf2e547e9319e2eb9f515e1e4330af63705cec openpilot/selfdrive/navigation. Only package import prefixes are changed. License copied alongside. No map data or driving records included.

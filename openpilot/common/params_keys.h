@@ -150,6 +150,7 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"Offroad_AcceleratorUnavailable", {CLEAR_ON_MANAGER_START, JSON}},
     // Persist backend build metadata across reboots and ignition cycles.
     {"JetlinkLink", {PERSISTENT | BACKUP, INT, "0"}},
+    {"JetlinkNavTrialEnabled", {PERSISTENT, BOOL, "0"}},
     {"JetlinkSpec", {PERSISTENT, JSON}},
     {"JetlinkModelPointers", {PERSISTENT, JSON}},
 

@@ -140,6 +140,13 @@ class Adapter:
     # read from hardwared and the UI's threads, which UnknownKeyName (a
     # params library older than the key) must not take down
     try:
+      from openpilot.sunnypilot.jetlink_adapter.nav_trial import PARAM, override
+      value = override(key, lambda: self._params().get_bool(PARAM))
+      if value is not None:
+        if key == KEYS.pointers:
+          saved = self._params().get(key)
+          return {**(saved if isinstance(saved, dict) else {}), **value}
+        return value
       return self._params().get(key)
     except Exception:
       return None
@@ -202,6 +209,9 @@ class Adapter:
 
     def engaged(timeout_ms: int) -> bool:
       sm.update(timeout_ms)
+      from openpilot.sunnypilot.jetlink_adapter.nav_trial import PARAM, shadow_only
+      if shadow_only(lambda: self._params().get_bool(PARAM)):
+        return True  # Keep the native joiner shadowing; never activate the trial.
       # a service that is missing, late or invalid counts as engaged
       valid = all(sm.seen[s] and sm.alive[s] and sm.valid[s] for s in services)
       cc = sm['carControl']
@@ -384,7 +394,15 @@ def prepare() -> bool:
 def attach(small, cam_w: int, cam_h: int):
   """modeld, once the camera is up and `small` is built: the model to run,
   `small` driving until the link has joined; None unless prepare() said yes."""
-  return _api().attach(small, cam_w, cam_h)
+  from openpilot.sunnypilot.jetlink_adapter.nav_trial import PARAM, ShadowGuard
+  from openpilot.common.params import Params
+  params = Params()
+  if not params.get_bool(PARAM):
+    return None
+  joined = _api().attach(small, cam_w, cam_h)
+  if joined is None or joined is small:
+    return joined
+  return ShadowGuard(joined, small, lambda: params.get_bool(PARAM))
 
 
 @_guarded(False)
